@@ -18,6 +18,18 @@ type HistoryEntry struct {
 	ConversationID string `json:"conversationId,omitempty"`
 }
 
+// SyncStats tracks the number of files processed during synchronization
+type SyncStats struct {
+	UnchangedCount int
+	SyncedCount    int
+}
+
+// MergeHistoryJsonlResult holds statistics about merged command histories
+type MergeHistoryJsonlResult struct {
+	ImportedCount int
+	ExportedCount int
+}
+
 // CopyFile copies a single file from src to dst. It returns an error if dst already exists.
 func CopyFile(src, dst string) error {
 	return copyFileInternal(src, dst, os.O_CREATE|os.O_WRONLY|os.O_EXCL)
@@ -50,7 +62,7 @@ func copyFileInternal(src, dst string, flags int) error {
 }
 
 // MergeDirectories recursively merges srcDir into dstDir without overwriting existing files.
-func MergeDirectories(srcDir, dstDir string) error {
+func MergeDirectories(srcDir, dstDir string, stats *SyncStats, verbosity int) error {
 	entries, err := os.ReadDir(srcDir)
 	if err != nil {
 		// If source doesn't exist, we just skip it
@@ -69,7 +81,7 @@ func MergeDirectories(srcDir, dstDir string) error {
 		dstPath := filepath.Join(dstDir, entry.Name())
 
 		if entry.IsDir() {
-			if err := MergeDirectories(srcPath, dstPath); err != nil {
+			if err := MergeDirectories(srcPath, dstPath, stats, verbosity); err != nil {
 				return err
 			}
 		} else {
@@ -78,11 +90,16 @@ func MergeDirectories(srcDir, dstDir string) error {
 				if err := CopyFile(srcPath, dstPath); err != nil {
 					fmt.Printf("Error copying file %s -> %s: %v\n", srcPath, dstPath, err)
 				} else {
-					fmt.Printf("Copied file: %s -> %s\n", srcPath, dstPath)
+					stats.SyncedCount++
+					if verbosity >= 1 {
+						fmt.Printf("Copied file: %s -> %s\n", srcPath, dstPath)
+					}
 				}
 			} else {
-				// File already exists on destination; skip to preserve local session
-				fmt.Printf("File already exists, skipping: %s\n", dstPath)
+				stats.UnchangedCount++
+				if verbosity >= 2 {
+					fmt.Printf("File already exists, skipping: %s\n", dstPath)
+				}
 			}
 		}
 	}
@@ -90,45 +107,74 @@ func MergeDirectories(srcDir, dstDir string) error {
 }
 
 // MergeHistoryJsonl merges the CLI command history JSONL files.
-func MergeHistoryJsonl(srcFile, dstFile string) error {
+func MergeHistoryJsonl(srcFile, dstFile string, verbosity int) (*MergeHistoryJsonlResult, error) {
 	if _, err := os.Stat(srcFile); os.IsNotExist(err) {
-		return nil
+		return &MergeHistoryJsonlResult{}, nil
 	}
 
-	historyEntries := make(map[string]HistoryEntry)
+	srcEntries := make(map[string]HistoryEntry)
+	dstEntries := make(map[string]HistoryEntry)
 
-	// Read existing entries from destination if it exists
+	// Read entries from source (remote)
+	if err := readEntries(srcFile, srcEntries); err != nil {
+		return nil, fmt.Errorf("error reading source history: %w", err)
+	}
+
+	// Read entries from destination (local)
 	if _, err := os.Stat(dstFile); err == nil {
-		if err := readEntries(dstFile, historyEntries); err != nil {
-			return fmt.Errorf("error reading destination history: %w", err)
+		if err := readEntries(dstFile, dstEntries); err != nil {
+			return nil, fmt.Errorf("error reading destination history: %w", err)
 		}
 	}
 
-	// Read entries from source
-	if err := readEntries(srcFile, historyEntries); err != nil {
-		return fmt.Errorf("error reading source history: %w", err)
+	// Union of all entries
+	mergedEntries := make(map[string]HistoryEntry)
+	for k, v := range srcEntries {
+		mergedEntries[k] = v
+	}
+	for k, v := range dstEntries {
+		mergedEntries[k] = v
 	}
 
-	// Convert map to slice
+	importedCount := 0
+	for k, v := range srcEntries {
+		if _, ok := dstEntries[k]; !ok {
+			importedCount++
+			if verbosity >= 1 {
+				fmt.Printf("Imported command: %s\n", v.Display)
+			}
+		}
+	}
+
+	exportedCount := 0
+	for k, v := range dstEntries {
+		if _, ok := srcEntries[k]; !ok {
+			exportedCount++
+			if verbosity >= 1 {
+				fmt.Printf("Exported command: %s\n", v.Display)
+			}
+		}
+	}
+
+	// Convert merged map to sorted slice
 	var sortedList []HistoryEntry
-	for _, entry := range historyEntries {
+	for _, entry := range mergedEntries {
 		sortedList = append(sortedList, entry)
 	}
 
-	// Sort entries by timestamp ascending
 	sort.Slice(sortedList, func(i, j int) bool {
 		return sortedList[i].Timestamp < sortedList[j].Timestamp
 	})
 
 	// Ensure destination directory exists
 	if err := os.MkdirAll(filepath.Dir(dstFile), 0755); err != nil {
-		return err
+		return nil, err
 	}
 
 	// Write back to destination
 	f, err := os.Create(dstFile)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer f.Close()
 
@@ -136,13 +182,20 @@ func MergeHistoryJsonl(srcFile, dstFile string) error {
 	for _, entry := range sortedList {
 		data, err := json.Marshal(entry)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if _, err := writer.Write(append(data, '\n')); err != nil {
-			return err
+			return nil, err
 		}
 	}
-	return writer.Flush()
+	if err := writer.Flush(); err != nil {
+		return nil, err
+	}
+
+	return &MergeHistoryJsonlResult{
+		ImportedCount: importedCount,
+		ExportedCount: exportedCount,
+	}, nil
 }
 
 func readEntries(filePath string, entries map[string]HistoryEntry) error {

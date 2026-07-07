@@ -12,6 +12,8 @@ import (
 func main() {
 	srcBaseFlag := flag.String("src", "", "Path to the backup source .gemini folder (e.g., /Users/ahmed.koraiem/agy_history/.gemini)")
 	syncFlag := flag.Bool("sync", false, "Perform the local history merge (with backup and back-propagation)")
+	verboseSyncedFlag := flag.Bool("v", false, "Show only synced (copied) files during full run")
+	verboseAllFlag := flag.Bool("vv", false, "Show all files and their sync state (copied and skipped) during full run")
 
 	// Define detailed help instructions
 	flag.Usage = func() {
@@ -22,8 +24,12 @@ func main() {
 		fmt.Println("\nExamples:")
 		fmt.Println("  1. Dry-run (check paths and simulate sync without making changes):")
 		fmt.Println("     agysync -src /path/to/backup/.gemini")
-		fmt.Println("\n  2. Perform Sync (Backup local configuration, merge files from source, and back-propagate changes to source):")
+		fmt.Println("\n  2. Perform Sync (Quiet / Summary-only output by default):")
 		fmt.Println("     agysync -src /path/to/backup/.gemini -sync")
+		fmt.Println("\n  3. Perform Sync with Verbose Syncing (Lists only files that are actually copied):")
+		fmt.Println("     agysync -src /path/to/backup/.gemini -sync -v")
+		fmt.Println("\n  4. Perform Sync with Verbose All (Lists all files checked, including skipped ones):")
+		fmt.Println("     agysync -src /path/to/backup/.gemini -sync -vv")
 		fmt.Println("\nSafety Features:")
 		fmt.Println("  - Pre-sync Backup: AgySync automatically archives your active history to ~/.gemini/agysync_backups/")
 		fmt.Println("    before any merging begins to prevent data loss.")
@@ -82,42 +88,72 @@ func main() {
 	}
 	fmt.Printf("Pre-sync backup created at: %s\n", backupPath)
 
+	// Determine verbosity level
+	verbosity := 0
+	if *verboseSyncedFlag {
+		verbosity = 1
+	}
+	if *verboseAllFlag {
+		verbosity = 2
+	}
+
+	// Track stats
+	downloadStats := &sync.SyncStats{}
+	uploadStats := &sync.SyncStats{}
+
 	// 2. Phase 1: Merge remote/source to local destination (Download & Merge)
-	fmt.Println("\n--- Phase 1: Merging remote history into local active paths ---")
+	if verbosity > 0 {
+		fmt.Println("\n--- Phase 1: Merging remote history into local active paths ---")
+	}
 	for _, f := range folders {
 		srcFolder := filepath.Join(srcBase, f.RelPath)
-		fmt.Printf("Merging %s -> %s...\n", srcFolder, f.DstPath)
-		if err := sync.MergeDirectories(srcFolder, f.DstPath); err != nil {
+		if verbosity >= 2 {
+			fmt.Printf("Checking folder %s -> %s...\n", srcFolder, f.DstPath)
+		}
+		if err := sync.MergeDirectories(srcFolder, f.DstPath, downloadStats, verbosity); err != nil {
 			fmt.Printf("Warning: error merging directory %s: %v\n", srcFolder, err)
 		}
 	}
 
 	// Merge history.jsonl
 	srcHistory := filepath.Join(srcBase, "antigravity-cli", "history.jsonl")
-	fmt.Printf("\nMerging history.jsonl: %s -> %s...\n", srcHistory, dstPaths.CliHistoryFile)
-	if err := sync.MergeHistoryJsonl(srcHistory, dstPaths.CliHistoryFile); err != nil {
+	if verbosity >= 2 {
+		fmt.Printf("Merging history.jsonl: %s -> %s...\n", srcHistory, dstPaths.CliHistoryFile)
+	}
+	historyResult, err := sync.MergeHistoryJsonl(srcHistory, dstPaths.CliHistoryFile, verbosity)
+	if err != nil {
 		fmt.Printf("Warning: error merging history.jsonl: %v\n", err)
-	} else {
-		fmt.Println("Successfully merged local history.jsonl!")
 	}
 
 	// 3. Phase 2: Back-propagate local to remote/source (Upload & Back-propagate)
-	fmt.Println("\n--- Phase 2: Back-propagating changes to source (simulating upload) ---")
+	if verbosity > 0 {
+		fmt.Println("\n--- Phase 2: Back-propagating changes to source ---")
+	}
 	for _, f := range folders {
 		srcFolder := filepath.Join(srcBase, f.RelPath)
-		fmt.Printf("Back-propagating %s -> %s...\n", f.DstPath, srcFolder)
-		if err := sync.MergeDirectories(f.DstPath, srcFolder); err != nil {
+		if verbosity >= 2 {
+			fmt.Printf("Back-propagating check %s -> %s...\n", f.DstPath, srcFolder)
+		}
+		if err := sync.MergeDirectories(f.DstPath, srcFolder, uploadStats, verbosity); err != nil {
 			fmt.Printf("Warning: error back-propagating directory %s: %v\n", srcFolder, err)
 		}
 	}
 
 	// Back-propagate merged history.jsonl (overwrite source history with merged version)
-	fmt.Printf("\nBack-propagating history.jsonl: %s -> %s...\n", dstPaths.CliHistoryFile, srcHistory)
+	if verbosity >= 2 {
+		fmt.Printf("Overwriting history.jsonl: %s -> %s...\n", dstPaths.CliHistoryFile, srcHistory)
+	}
 	if err := sync.CopyFileOverwrite(dstPaths.CliHistoryFile, srcHistory); err != nil {
 		fmt.Printf("Warning: error back-propagating history.jsonl: %v\n", err)
-	} else {
-		fmt.Println("Successfully back-propagated history.jsonl to source!")
 	}
 
-	fmt.Println("\nSynchronization complete and changes back-propagated!")
+	// Print final stats summary
+	fmt.Println("\n=== Sync Summary ===")
+	fmt.Printf("Kept %d files unchanged, downloaded %d new files from backup, uploaded %d files to backup.\n",
+		downloadStats.UnchangedCount, downloadStats.SyncedCount, uploadStats.SyncedCount)
+	if historyResult != nil {
+		fmt.Printf("CLI History: imported %d new commands, exported %d new commands.\n",
+			historyResult.ImportedCount, historyResult.ExportedCount)
+	}
+	fmt.Println("====================")
 }
