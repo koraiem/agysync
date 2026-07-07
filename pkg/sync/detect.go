@@ -16,6 +16,10 @@ type Paths struct {
 	IdeBrain          string
 	WorkspaceHistory  string
 	CliHistoryFile    string
+	ConfigDir         string
+	MachineIDFile     string
+	SettingsFile      string
+	TokenFile         string
 }
 
 // DetectPaths locates the active Antigravity folders on the current system
@@ -26,6 +30,8 @@ func DetectPaths() (*Paths, error) {
 	}
 
 	baseDir := filepath.Join(home, ".gemini")
+	configDir := filepath.Join(baseDir, "agysync_config")
+
 	return &Paths{
 		BaseDir:           baseDir,
 		CliConversations:  filepath.Join(baseDir, "antigravity-cli", "conversations"),
@@ -36,5 +42,9 @@ func DetectPaths() (*Paths, error) {
 		IdeBrain:          filepath.Join(baseDir, "antigravity-ide", "brain"),
 		WorkspaceHistory:  filepath.Join(baseDir, "history"),
 		CliHistoryFile:    filepath.Join(baseDir, "antigravity-cli", "history.jsonl"),
+		ConfigDir:         configDir,
+		MachineIDFile:     filepath.Join(configDir, "machine_id"),
+		SettingsFile:      filepath.Join(configDir, "settings.json"),
+		TokenFile:         filepath.Join(configDir, "oauth_token.json"),
 	}, nil
 }

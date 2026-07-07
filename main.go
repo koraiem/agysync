@@ -5,36 +5,39 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
+	"time"
 
+	"agysync/pkg/drive"
 	"agysync/pkg/sync"
 )
 
 func main() {
-	srcBaseFlag := flag.String("src", "", "Path to the backup source .gemini folder (e.g., /Users/ahmed.koraiem/agy_history/.gemini)")
-	syncFlag := flag.Bool("sync", false, "Perform the local history merge (with backup and back-propagation)")
-	verboseSyncedFlag := flag.Bool("v", false, "Show only synced (copied) files during full run")
-	verboseAllFlag := flag.Bool("vv", false, "Show all files and their sync state (copied and skipped) during full run")
+	srcBaseFlag := flag.String("src", "", "Path to backup source .gemini folder (local folder sync mode fallback)")
+	syncFlag := flag.Bool("sync", false, "Perform the bidirectional sync (with backup, propagation, and logs)")
+	verboseSyncedFlag := flag.Bool("v", false, "Show only synced (copied) files during execution")
+	verboseAllFlag := flag.Bool("vv", false, "Show all files checked (copied and skipped) during execution")
 
-	// Define detailed help instructions
+	// Custom Usage
 	flag.Usage = func() {
 		fmt.Fprintf(flag.CommandLine.Output(), "Usage of %s:\n", os.Args[0])
 		fmt.Println("\nAntigravity Sync (AgySync) CLI synchronizes conversations, logs, and command histories across platforms.")
 		fmt.Println("\nFlags:")
 		flag.PrintDefaults()
 		fmt.Println("\nExamples:")
-		fmt.Println("  1. Dry-run (check paths and simulate sync without making changes):")
-		fmt.Println("     agysync -src /path/to/backup/.gemini")
-		fmt.Println("\n  2. Perform Sync (Quiet / Summary-only output by default):")
+		fmt.Println("  1. Dry-run Google Drive Sync (Simulate Drive sync and show comparison report):")
+		fmt.Println("     agysync")
+		fmt.Println("\n  2. Perform Google Drive Sync (Syncs to Google Drive AppData folder, requires OAuth2):")
+		fmt.Println("     export AGYSYNC_CLIENT_ID=\"your_id\"")
+		fmt.Println("     export AGYSYNC_CLIENT_SECRET=\"your_secret\"")
+		fmt.Println("     agysync -sync")
+		fmt.Println("\n  3. Local Folder Sync Mode (Fallback / Offline sync):")
 		fmt.Println("     agysync -src /path/to/backup/.gemini -sync")
-		fmt.Println("\n  3. Perform Sync with Verbose Syncing (Lists only files that are actually copied):")
-		fmt.Println("     agysync -src /path/to/backup/.gemini -sync -v")
-		fmt.Println("\n  4. Perform Sync with Verbose All (Lists all files checked, including skipped ones):")
-		fmt.Println("     agysync -src /path/to/backup/.gemini -sync -vv")
 		fmt.Println("\nSafety Features:")
-		fmt.Println("  - Pre-sync Backup: AgySync automatically archives your active history to ~/.gemini/agysync_backups/")
+		fmt.Println("  - Pre-sync Backup: AgySync automatically archives your active configuration to ~/.gemini/agysync_backups/")
 		fmt.Println("    before any merging begins to prevent data loss.")
-		fmt.Println("  - Non-Destructive: Sync never overwrites active local session databases; it only adds new database files.")
-		fmt.Println("  - Command Deduplication: history.jsonl files are merged chronologically by timestamp and deduplicated.")
+		fmt.Println("  - Shared Node Control: Limits connection up to 2 machines for free (customizable via licenses in Drive).")
+		fmt.Println("  - Unified Sync Logs: Appends sync metadata and statistics to a global audit log on Google Drive.")
 	}
 
 	flag.Parse()
@@ -49,15 +52,27 @@ func main() {
 	fmt.Println("=== Antigravity Sync (AgySync) ===")
 	fmt.Printf("Active Base Directory: %s\n", dstPaths.BaseDir)
 
-	if *srcBaseFlag == "" {
-		fmt.Println("\nUsage: agysync -src <path_to_source_gemini_folder> -sync")
-		fmt.Println("Run with -h or --help for detailed documentation and examples.")
-		os.Exit(0)
+	// Determine verbosity level
+	verbosity := 0
+	if *verboseSyncedFlag {
+		verbosity = 1
+	}
+	if *verboseAllFlag {
+		verbosity = 2
 	}
 
-	srcBase := *srcBaseFlag
+	// 1. Differentiate execution paths: Local Sync vs Google Drive Sync
+	if *srcBaseFlag != "" {
+		runLocalFolderSync(*srcBaseFlag, dstPaths, *syncFlag, verbosity)
+		return
+	}
 
-	// Folders to merge
+	runGoogleDriveSync(dstPaths, *syncFlag, verbosity)
+}
+
+func runLocalFolderSync(srcBase string, dstPaths *sync.Paths, performSync bool, verbosity int) {
+	fmt.Println("\nMode: Local Folder Sync (Fallback)")
+
 	folders := []sync.FolderMap{
 		{RelPath: "antigravity/conversations", DstPath: dstPaths.CoreConversations},
 		{RelPath: "antigravity/brain", DstPath: dstPaths.CoreBrain},
@@ -68,19 +83,18 @@ func main() {
 		{RelPath: "history", DstPath: dstPaths.WorkspaceHistory},
 	}
 
-	if !*syncFlag {
+	srcHistory := filepath.Join(srcBase, "antigravity-cli", "history.jsonl")
+
+	if !performSync {
 		fmt.Println("\n[Dry Run Mode] No changes will be written.")
 		fmt.Printf("Source Base: %s\n", srcBase)
-		fmt.Printf("Destination Base: %s\n", dstPaths.BaseDir)
-
-		srcHistory := filepath.Join(srcBase, "antigravity-cli", "history.jsonl")
 		if err := sync.CompareSyncState(srcBase, folders, srcHistory, dstPaths.CliHistoryFile); err != nil {
 			fmt.Printf("Error generating comparison report: %v\n", err)
 		}
-		os.Exit(0)
+		return
 	}
 
-	// 1. Create a safety backup of the current active state before starting modifications
+	// Create safety backup
 	backupPath, err := sync.BackupActiveState(dstPaths)
 	if err != nil {
 		fmt.Printf("Fatal Error: pre-sync backup failed: %v. Aborting sync.\n", err)
@@ -88,61 +102,32 @@ func main() {
 	}
 	fmt.Printf("Pre-sync backup created at: %s\n", backupPath)
 
-	// Determine verbosity level
-	verbosity := 0
-	if *verboseSyncedFlag {
-		verbosity = 1
-	}
-	if *verboseAllFlag {
-		verbosity = 2
-	}
-
-	// Track stats
 	downloadStats := &sync.SyncStats{}
 	uploadStats := &sync.SyncStats{}
 
-	// 2. Phase 1: Merge remote/source to local destination (Download & Merge)
-	if verbosity > 0 {
-		fmt.Println("\n--- Phase 1: Merging remote history into local active paths ---")
-	}
+	// Phase 1: Download/Merge
+	fmt.Println("\n--- Phase 1: Merging remote history into local active paths ---")
 	for _, f := range folders {
 		srcFolder := filepath.Join(srcBase, f.RelPath)
-		if verbosity >= 2 {
-			fmt.Printf("Checking folder %s -> %s...\n", srcFolder, f.DstPath)
-		}
 		if err := sync.MergeDirectories(srcFolder, f.DstPath, downloadStats, verbosity); err != nil {
 			fmt.Printf("Warning: error merging directory %s: %v\n", srcFolder, err)
 		}
 	}
 
-	// Merge history.jsonl
-	srcHistory := filepath.Join(srcBase, "antigravity-cli", "history.jsonl")
-	if verbosity >= 2 {
-		fmt.Printf("Merging history.jsonl: %s -> %s...\n", srcHistory, dstPaths.CliHistoryFile)
-	}
 	historyResult, err := sync.MergeHistoryJsonl(srcHistory, dstPaths.CliHistoryFile, verbosity)
 	if err != nil {
 		fmt.Printf("Warning: error merging history.jsonl: %v\n", err)
 	}
 
-	// 3. Phase 2: Back-propagate local to remote/source (Upload & Back-propagate)
-	if verbosity > 0 {
-		fmt.Println("\n--- Phase 2: Back-propagating changes to source ---")
-	}
+	// Phase 2: Upload/Propagate
+	fmt.Println("\n--- Phase 2: Back-propagating changes to source ---")
 	for _, f := range folders {
 		srcFolder := filepath.Join(srcBase, f.RelPath)
-		if verbosity >= 2 {
-			fmt.Printf("Back-propagating check %s -> %s...\n", f.DstPath, srcFolder)
-		}
 		if err := sync.MergeDirectories(f.DstPath, srcFolder, uploadStats, verbosity); err != nil {
 			fmt.Printf("Warning: error back-propagating directory %s: %v\n", srcFolder, err)
 		}
 	}
 
-	// Back-propagate merged history.jsonl (overwrite source history with merged version)
-	if verbosity >= 2 {
-		fmt.Printf("Overwriting history.jsonl: %s -> %s...\n", dstPaths.CliHistoryFile, srcHistory)
-	}
 	if err := sync.CopyFileOverwrite(dstPaths.CliHistoryFile, srcHistory); err != nil {
 		fmt.Printf("Warning: error back-propagating history.jsonl: %v\n", err)
 	}
@@ -150,6 +135,270 @@ func main() {
 	// Print final stats summary
 	fmt.Println("\n=== Sync Summary ===")
 	fmt.Printf("Kept %d files unchanged, downloaded %d new files from backup, uploaded %d files to backup.\n",
+		downloadStats.UnchangedCount, downloadStats.SyncedCount, uploadStats.SyncedCount)
+	if historyResult != nil {
+		fmt.Printf("CLI History: imported %d new commands, exported %d new commands.\n",
+			historyResult.ImportedCount, historyResult.ExportedCount)
+	}
+	fmt.Println("====================")
+}
+
+func runGoogleDriveSync(dstPaths *sync.Paths, performSync bool, verbosity int) {
+	fmt.Println("\nMode: Google Drive Cloud Sync")
+
+	// 1. Load Local Machine Identity
+	localNode, err := sync.LoadLocalSettings(dstPaths)
+	if err != nil {
+		fmt.Printf("Fatal Error: failed to load local settings: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Printf("Device Node ID:   %s\n", localNode.ID[:8]+"...")
+	fmt.Printf("Device Node Name: %s\n", localNode.Name)
+	fmt.Printf("Device Node Type: %s\n", localNode.Type)
+
+	// 2. Connect to Google Drive AppData space
+	driveSrv, err := drive.GetDriveService(dstPaths)
+	if err != nil {
+		fmt.Printf("\nAuthentication Error: %v\n", err)
+		fmt.Println("\nPlease set Google OAuth environment variables to run cloud sync:")
+		fmt.Println("  export AGYSYNC_CLIENT_ID=\"your_client_id\"")
+		fmt.Println("  export AGYSYNC_CLIENT_SECRET=\"your_client_secret\"")
+		fmt.Println("\nFor offline testing, use the local mode folder flag: agysync -src <backup_folder_path>")
+		os.Exit(1)
+	}
+
+	// 3. Fetch global metadata and check registration/limits
+	meta, err := driveSrv.GetMetadataFile()
+	if err != nil {
+		fmt.Printf("Error retrieving cloud metadata: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Validate node limits
+	if _, err := sync.RegisterAndValidateNode(meta, localNode); err != nil {
+		fmt.Printf("\nLicensing Error: %v\n", err)
+		fmt.Println("Upgrade your account or contact support to connect more devices.")
+		os.Exit(1)
+	}
+
+	if performSync {
+		// Save registration metadata back to Drive
+		if err := driveSrv.SaveMetadataFile(meta); err != nil {
+			fmt.Printf("Warning: failed to update node registry in Drive: %v\n", err)
+		}
+	}
+
+	// Folders to process
+	folders := []string{
+		"antigravity/conversations",
+		"antigravity/brain",
+		"antigravity-cli/conversations",
+		"antigravity-cli/brain",
+		"antigravity-ide/conversations",
+		"antigravity-ide/brain",
+		"history",
+	}
+
+	// 4. Retrieve cloud files metadata
+	remoteFiles, err := driveSrv.ListAppDataFiles()
+	if err != nil {
+		fmt.Printf("Error listing files on Google Drive: %v\n", err)
+		os.Exit(1)
+	}
+
+	if !performSync {
+		// Dry Run Comparison report for Google Drive
+		fmt.Println("\n[Dry Run Mode] Simulating cloud synchronization...")
+		fmt.Println("\n=== Sync Comparison Report ===")
+
+		toDownloadCount := 0
+		toUploadCount := 0
+
+		for _, folder := range folders {
+			localDir := filepath.Join(dstPaths.BaseDir, folder)
+			fmt.Printf("\nComparing Folder: %s\n", folder)
+
+			// Checks what files we would upload
+			var missingOnDrive []string
+			_ = filepath.Walk(localDir, func(path string, info os.FileInfo, err error) error {
+				if err != nil || info.IsDir() {
+					return nil
+				}
+				rel, _ := filepath.Rel(dstPaths.BaseDir, path)
+				flat := drive.FlatName(rel)
+				if _, ok := remoteFiles[flat]; !ok {
+					missingOnDrive = append(missingOnDrive, rel)
+				}
+				return nil
+			})
+
+			// Checks what files we would download
+			var missingLocally []string
+			prefix := drive.FlatName(folder) + "__"
+			for name := range remoteFiles {
+				if strings.HasPrefix(name, prefix) {
+					rel := drive.RelPath(name)
+					localPath := filepath.Join(dstPaths.BaseDir, rel)
+					if _, err := os.Stat(localPath); os.IsNotExist(err) {
+						missingLocally = append(missingLocally, rel)
+					}
+				}
+			}
+
+			if len(missingOnDrive) == 0 && len(missingLocally) == 0 {
+				fmt.Println("  ✓ Folder is perfectly in sync with Google Drive.")
+			} else {
+				if len(missingLocally) > 0 {
+					fmt.Printf("  ⬇ Would download %d missing file(s) from Drive:\n", len(missingLocally))
+					for _, path := range missingLocally {
+						fmt.Printf("    + %s\n", path)
+					}
+					toDownloadCount += len(missingLocally)
+				}
+				if len(missingOnDrive) > 0 {
+					fmt.Printf("  ⬆ Would upload %d local file(s) to Drive:\n", len(missingOnDrive))
+					for _, path := range missingOnDrive {
+						fmt.Printf("    + %s\n", path)
+					}
+					toUploadCount += len(missingOnDrive)
+				}
+			}
+		}
+
+		// history.jsonl comparison
+		fmt.Println("\nComparing CLI History: history.jsonl")
+		tempLocalHistory := filepath.Join(os.TempDir(), "agysync_temp_hist.jsonl")
+		if _, ok := remoteFiles["history.jsonl"]; ok {
+			err = driveSrv.DownloadFile("history.jsonl", tempLocalHistory)
+		}
+		if err == nil {
+			_ = sync.CompareSyncState(os.TempDir(), []sync.FolderMap{}, tempLocalHistory, dstPaths.CliHistoryFile)
+			_ = os.Remove(tempLocalHistory)
+		} else {
+			fmt.Println("  No remote command history file found in Google Drive AppData.")
+		}
+
+		fmt.Println("\n=======================================")
+		return
+	}
+
+	// 5. Run Sync Execution
+	backupPath, err := sync.BackupActiveState(dstPaths)
+	if err != nil {
+		fmt.Printf("Fatal Error: pre-sync backup failed: %v. Aborting sync.\n", err)
+		os.Exit(1)
+	}
+	fmt.Printf("Pre-sync backup created at: %s\n", backupPath)
+
+	downloadStats := &sync.SyncStats{}
+	uploadStats := &sync.SyncStats{}
+
+	// Phase 1: Download & Merge from Google Drive
+	if verbosity > 0 {
+		fmt.Println("\n--- Phase 1: Downloading updates from Google Drive AppData ---")
+	}
+	for _, folder := range folders {
+		prefix := drive.FlatName(folder) + "__"
+		for name := range remoteFiles {
+			if strings.HasPrefix(name, prefix) {
+				rel := drive.RelPath(name)
+				localPath := filepath.Join(dstPaths.BaseDir, rel)
+
+				if _, err := os.Stat(localPath); os.IsNotExist(err) {
+					if verbosity >= 1 {
+						fmt.Printf("Downloading: %s -> %s\n", name, localPath)
+					}
+					if err := driveSrv.DownloadFile(name, localPath); err != nil {
+						fmt.Printf("Warning: failed to download file %s: %v\n", name, err)
+					} else {
+						downloadStats.SyncedCount++
+					}
+				} else {
+					downloadStats.UnchangedCount++
+					if verbosity >= 2 {
+						fmt.Printf("File already exists locally, skipping: %s\n", localPath)
+					}
+				}
+			}
+		}
+	}
+
+	// Merge history.jsonl
+	var historyResult *sync.MergeHistoryJsonlResult
+	if _, ok := remoteFiles["history.jsonl"]; ok {
+		tempLocalHistory := filepath.Join(os.TempDir(), "agysync_temp_hist.jsonl")
+		if err := driveSrv.DownloadFile("history.jsonl", tempLocalHistory); err == nil {
+			historyResult, _ = sync.MergeHistoryJsonl(tempLocalHistory, dstPaths.CliHistoryFile, verbosity)
+			_ = os.Remove(tempLocalHistory)
+		}
+	}
+
+	// Phase 2: Upload & Propagate to Google Drive
+	if verbosity > 0 {
+		fmt.Println("\n--- Phase 2: Uploading local changes to Google Drive AppData ---")
+	}
+	for _, folder := range folders {
+		localDir := filepath.Join(dstPaths.BaseDir, folder)
+		_ = filepath.Walk(localDir, func(path string, info os.FileInfo, err error) error {
+			if err != nil || info.IsDir() {
+				return nil
+			}
+			rel, _ := filepath.Rel(dstPaths.BaseDir, path)
+			flat := drive.FlatName(rel)
+
+			if _, exists := remoteFiles[flat]; !exists {
+				if verbosity >= 1 {
+					fmt.Printf("Uploading: %s -> %s\n", rel, flat)
+				}
+				if err := driveSrv.UploadFile(path, flat); err != nil {
+					fmt.Printf("Warning: failed to upload file %s: %v\n", rel, err)
+				} else {
+					uploadStats.SyncedCount++
+				}
+			} else {
+				uploadStats.UnchangedCount++
+				if verbosity >= 2 {
+					fmt.Printf("File already uploaded to Drive, skipping: %s\n", rel)
+				}
+			}
+			return nil
+		})
+	}
+
+	// Upload merged history.jsonl
+	if _, err := os.Stat(dstPaths.CliHistoryFile); err == nil {
+		if err := driveSrv.UploadFile(dstPaths.CliHistoryFile, "history.jsonl"); err != nil {
+			fmt.Printf("Warning: failed to upload merged history.jsonl: %v\n", err)
+		}
+	}
+
+	// 6. Write and upload shared sync log
+	importedCount := 0
+	exportedCount := 0
+	if historyResult != nil {
+		importedCount = historyResult.ImportedCount
+		exportedCount = historyResult.ExportedCount
+	}
+
+	logEntry := map[string]interface{}{
+		"timestamp":         time.Now().Unix(),
+		"machine_id":        localNode.ID,
+		"machine_name":      localNode.Name,
+		"machine_type":      localNode.Type,
+		"files_unchanged":   downloadStats.UnchangedCount,
+		"files_downloaded":  downloadStats.SyncedCount,
+		"files_uploaded":    uploadStats.SyncedCount,
+		"commands_imported": importedCount,
+		"commands_exported": exportedCount,
+	}
+
+	if err := driveSrv.AppendGlobalSyncLog(logEntry); err != nil {
+		fmt.Printf("Warning: failed to write sync audit log to Google Drive: %v\n", err)
+	}
+
+	// Print final stats summary
+	fmt.Println("\n=== Sync Summary ===")
+	fmt.Printf("Kept %d files unchanged, downloaded %d new files from Drive, uploaded %d files to Drive.\n",
 		downloadStats.UnchangedCount, downloadStats.SyncedCount, uploadStats.SyncedCount)
 	if historyResult != nil {
 		fmt.Printf("CLI History: imported %d new commands, exported %d new commands.\n",
