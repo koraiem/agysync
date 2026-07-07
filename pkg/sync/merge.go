@@ -20,20 +20,26 @@ type HistoryEntry struct {
 
 // CopyFile copies a single file from src to dst. It returns an error if dst already exists.
 func CopyFile(src, dst string) error {
-	// Open source
+	return copyFileInternal(src, dst, os.O_CREATE|os.O_WRONLY|os.O_EXCL)
+}
+
+// CopyFileOverwrite copies a single file from src to dst, overwriting the destination if it exists.
+func CopyFileOverwrite(src, dst string) error {
+	return copyFileInternal(src, dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC)
+}
+
+func copyFileInternal(src, dst string, flags int) error {
 	srcFile, err := os.Open(src)
 	if err != nil {
 		return err
 	}
 	defer srcFile.Close()
 
-	// Ensure destination directory exists
 	if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
 		return err
 	}
 
-	// Create destination
-	dstFile, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0644)
+	dstFile, err := os.OpenFile(dst, flags, 0644)
 	if err != nil {
 		return err
 	}
