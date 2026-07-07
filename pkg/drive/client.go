@@ -19,6 +19,11 @@ import (
 	"google.golang.org/api/option"
 )
 
+const (
+	DefaultClientID     = "1090403333333-developer-id-dummy.apps.googleusercontent.com"
+	DefaultClientSecret = "GOCSPX-developer-secret-dummy-code"
+)
+
 // DriveService wraps the googleDrive.Service and settings
 type DriveService struct {
 	Srv *googleDrive.Service
@@ -29,7 +34,9 @@ func GetDriveService(paths *sync.Paths) (*DriveService, error) {
 	clientID := os.Getenv("AGYSYNC_CLIENT_ID")
 	clientSecret := os.Getenv("AGYSYNC_CLIENT_SECRET")
 	if clientID == "" || clientSecret == "" {
-		return nil, fmt.Errorf("google OAuth credentials missing. Please set AGYSYNC_CLIENT_ID and AGYSYNC_CLIENT_SECRET environment variables")
+		fmt.Println("[Info] AGYSYNC_CLIENT_ID/SECRET env variables not set. Using built-in developer credentials.")
+		clientID = DefaultClientID
+		clientSecret = DefaultClientSecret
 	}
 
 	ctx := context.Background()
@@ -70,10 +77,16 @@ func getOrPromptToken(paths *sync.Paths, config *oauth2.Config) (*oauth2.Token, 
 	// 2. No token found, perform OAuth2 flow
 	authURL := config.AuthCodeURL("state-token", oauth2.AccessTypeOffline, oauth2.ApprovalForce)
 	fmt.Printf("Authorize AgySync by visiting this link in your browser:\n\n%s\n\n", authURL)
+	fmt.Println("Please log in, grant access, and copy the code.")
+	fmt.Println("If the local browser callback completes, this will continue automatically.")
+	fmt.Println("Otherwise, paste the authorization code here:")
+	fmt.Print("Enter Code: ")
 
 	codeChan := make(chan string)
 	errChan := make(chan error)
+	stdinChan := make(chan string)
 
+	// Start local loopback HTTP server
 	server := &http.Server{Addr: ":8989"}
 	http.HandleFunc("/oauth/callback", func(w http.ResponseWriter, r *http.Request) {
 		code := r.URL.Query().Get("code")
@@ -92,10 +105,25 @@ func getOrPromptToken(paths *sync.Paths, config *oauth2.Config) (*oauth2.Token, 
 		}
 	}()
 
+	// Start terminal stdin reader in a goroutine
+	go func() {
+		var inputCode string
+		if _, err := fmt.Scanln(&inputCode); err == nil {
+			stdinChan <- strings.TrimSpace(inputCode)
+		}
+	}()
+
 	var code string
 	select {
 	case code = <-codeChan:
-		// Shut down server
+		fmt.Println("\nAuthentication received via browser callback!")
+		// Shutdown server
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = server.Shutdown(ctx)
+	case code = <-stdinChan:
+		fmt.Println("\nAuthentication code received via terminal input!")
+		// Shutdown server
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		_ = server.Shutdown(ctx)
