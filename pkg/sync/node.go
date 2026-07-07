@@ -13,9 +13,11 @@ import (
 
 // MachineConfig defines the identity of a device node
 type MachineConfig struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
-	Type string `json:"type"` // desktop, laptop, server
+	ID           string `json:"id"`
+	Name         string `json:"name"`
+	Type         string `json:"type"` // desktop, laptop, server
+	ClientID     string `json:"client_id"`
+	ClientSecret string `json:"client_secret"`
 }
 
 // SyncMetadata represents the global state stored in Google Drive AppData

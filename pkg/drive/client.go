@@ -31,10 +31,25 @@ type DriveService struct {
 
 // GetDriveService initializes the Drive API client
 func GetDriveService(paths *sync.Paths) (*DriveService, error) {
-	clientID := os.Getenv("AGYSYNC_CLIENT_ID")
-	clientSecret := os.Getenv("AGYSYNC_CLIENT_SECRET")
+	var clientID, clientSecret string
+
+	// 1. Try reading credentials from settings.json
+	localConfig, err := sync.LoadLocalSettings(paths)
+	if err == nil && localConfig != nil {
+		clientID = localConfig.ClientID
+		clientSecret = localConfig.ClientSecret
+	}
+
+	// 2. Fallback to env variables if not set in settings.json
 	if clientID == "" || clientSecret == "" {
-		fmt.Println("[Info] AGYSYNC_CLIENT_ID/SECRET env variables not set. Using built-in developer credentials.")
+		clientID = os.Getenv("AGYSYNC_CLIENT_ID")
+		clientSecret = os.Getenv("AGYSYNC_CLIENT_SECRET")
+	}
+
+	// 3. Fallback to built-in developer credentials (which require test-user registration)
+	if clientID == "" || clientSecret == "" {
+		fmt.Println("[Info] No custom credentials found in settings.json or env variables.")
+		fmt.Printf("Using default developer credentials. To use your own client ID and secret, paste them into:\n  %s\n\n", paths.SettingsFile)
 		clientID = DefaultClientID
 		clientSecret = DefaultClientSecret
 	}
