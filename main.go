@@ -51,10 +51,26 @@ func main() {
 
 	srcBase := *srcBaseFlag
 
+	// Folders to merge
+	folders := []sync.FolderMap{
+		{RelPath: "antigravity/conversations", DstPath: dstPaths.CoreConversations},
+		{RelPath: "antigravity/brain", DstPath: dstPaths.CoreBrain},
+		{RelPath: "antigravity-cli/conversations", DstPath: dstPaths.CliConversations},
+		{RelPath: "antigravity-cli/brain", DstPath: dstPaths.CliBrain},
+		{RelPath: "antigravity-ide/conversations", DstPath: dstPaths.IdeConversations},
+		{RelPath: "antigravity-ide/brain", DstPath: dstPaths.IdeBrain},
+		{RelPath: "history", DstPath: dstPaths.WorkspaceHistory},
+	}
+
 	if !*syncFlag {
 		fmt.Println("\n[Dry Run Mode] No changes will be written.")
 		fmt.Printf("Source Base: %s\n", srcBase)
 		fmt.Printf("Destination Base: %s\n", dstPaths.BaseDir)
+
+		srcHistory := filepath.Join(srcBase, "antigravity-cli", "history.jsonl")
+		if err := sync.CompareSyncState(srcBase, folders, srcHistory, dstPaths.CliHistoryFile); err != nil {
+			fmt.Printf("Error generating comparison report: %v\n", err)
+		}
 		os.Exit(0)
 	}
 
@@ -66,26 +82,12 @@ func main() {
 	}
 	fmt.Printf("Pre-sync backup created at: %s\n", backupPath)
 
-	// Folders to merge
-	folders := []struct {
-		relPath string
-		dstPath string
-	}{
-		{"antigravity/conversations", dstPaths.CoreConversations},
-		{"antigravity/brain", dstPaths.CoreBrain},
-		{"antigravity-cli/conversations", dstPaths.CliConversations},
-		{"antigravity-cli/brain", dstPaths.CliBrain},
-		{"antigravity-ide/conversations", dstPaths.IdeConversations},
-		{"antigravity-ide/brain", dstPaths.IdeBrain},
-		{"history", dstPaths.WorkspaceHistory},
-	}
-
 	// 2. Phase 1: Merge remote/source to local destination (Download & Merge)
 	fmt.Println("\n--- Phase 1: Merging remote history into local active paths ---")
 	for _, f := range folders {
-		srcFolder := filepath.Join(srcBase, f.relPath)
-		fmt.Printf("Merging %s -> %s...\n", srcFolder, f.dstPath)
-		if err := sync.MergeDirectories(srcFolder, f.dstPath); err != nil {
+		srcFolder := filepath.Join(srcBase, f.RelPath)
+		fmt.Printf("Merging %s -> %s...\n", srcFolder, f.DstPath)
+		if err := sync.MergeDirectories(srcFolder, f.DstPath); err != nil {
 			fmt.Printf("Warning: error merging directory %s: %v\n", srcFolder, err)
 		}
 	}
@@ -102,9 +104,9 @@ func main() {
 	// 3. Phase 2: Back-propagate local to remote/source (Upload & Back-propagate)
 	fmt.Println("\n--- Phase 2: Back-propagating changes to source (simulating upload) ---")
 	for _, f := range folders {
-		srcFolder := filepath.Join(srcBase, f.relPath)
-		fmt.Printf("Back-propagating %s -> %s...\n", f.dstPath, srcFolder)
-		if err := sync.MergeDirectories(f.dstPath, srcFolder); err != nil {
+		srcFolder := filepath.Join(srcBase, f.RelPath)
+		fmt.Printf("Back-propagating %s -> %s...\n", f.DstPath, srcFolder)
+		if err := sync.MergeDirectories(f.DstPath, srcFolder); err != nil {
 			fmt.Printf("Warning: error back-propagating directory %s: %v\n", srcFolder, err)
 		}
 	}
