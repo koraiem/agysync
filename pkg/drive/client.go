@@ -60,7 +60,7 @@ func GetDriveService(paths *sync.Paths) (*DriveService, error) {
 		ClientSecret: clientSecret,
 		Endpoint:     google.Endpoint,
 		Scopes:       []string{googleDrive.DriveAppdataScope},
-		RedirectURL:  "http://localhost:8989/oauth/callback",
+		RedirectURL:  "http://localhost:8989",
 	}
 
 	token, err := getOrPromptToken(paths, config)
@@ -101,9 +101,9 @@ func getOrPromptToken(paths *sync.Paths, config *oauth2.Config) (*oauth2.Token, 
 	errChan := make(chan error)
 	stdinChan := make(chan string)
 
-	// Start local loopback HTTP server
-	server := &http.Server{Addr: ":8989"}
-	http.HandleFunc("/oauth/callback", func(w http.ResponseWriter, r *http.Request) {
+	// Start local loopback HTTP server with custom ServeMux to handle callback
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		code := r.URL.Query().Get("code")
 		if code == "" {
 			errChan <- fmt.Errorf("missing code in OAuth callback")
@@ -113,6 +113,8 @@ func getOrPromptToken(paths *sync.Paths, config *oauth2.Config) (*oauth2.Token, 
 		fmt.Fprintln(w, "Authentication successful! You can close this tab and return to the terminal.")
 		codeChan <- code
 	})
+
+	server := &http.Server{Addr: ":8989", Handler: mux}
 
 	go func() {
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
