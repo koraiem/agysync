@@ -297,6 +297,27 @@ func runGoogleDriveSync(dstPaths *sync.Paths, performSync bool, verbosity int) {
 	if verbosity > 0 {
 		fmt.Println("\n--- Phase 1: Downloading updates from Google Drive AppData ---")
 	}
+
+	// Count total remote files matching our prefixes first
+	totalRemoteFiles := 0
+	for _, folder := range folders {
+		prefix := drive.FlatName(folder) + "__"
+		for name := range remoteFiles {
+			if strings.HasPrefix(name, prefix) {
+				totalRemoteFiles++
+			}
+		}
+	}
+
+	var pTracker *sync.ProgressTracker
+	if verbosity == 0 {
+		pTracker = &sync.ProgressTracker{
+			Label: "Downloading from Google Drive",
+			Total: totalRemoteFiles,
+		}
+		pTracker.Print()
+	}
+
 	for _, folder := range folders {
 		prefix := drive.FlatName(folder) + "__"
 		for name := range remoteFiles {
@@ -309,7 +330,7 @@ func runGoogleDriveSync(dstPaths *sync.Paths, performSync bool, verbosity int) {
 						fmt.Printf("Downloading: %s -> %s\n", name, localPath)
 					}
 					if err := driveSrv.DownloadFile(name, localPath); err != nil {
-						fmt.Printf("Warning: failed to download file %s: %v\n", name, err)
+						fmt.Printf("\nWarning: failed to download file %s: %v\n", name, err)
 					} else {
 						downloadStats.SyncedCount++
 					}
@@ -319,8 +340,16 @@ func runGoogleDriveSync(dstPaths *sync.Paths, performSync bool, verbosity int) {
 						fmt.Printf("File already exists locally, skipping: %s\n", localPath)
 					}
 				}
+
+				if pTracker != nil {
+					pTracker.Current++
+					pTracker.Print()
+				}
 			}
 		}
+	}
+	if pTracker != nil {
+		pTracker.Finish()
 	}
 
 	// Merge history.jsonl
@@ -337,6 +366,23 @@ func runGoogleDriveSync(dstPaths *sync.Paths, performSync bool, verbosity int) {
 	if verbosity > 0 {
 		fmt.Println("\n--- Phase 2: Uploading local changes to Google Drive AppData ---")
 	}
+
+	// Count total local files first
+	totalLocalFiles := 0
+	for _, folder := range folders {
+		totalLocalFiles += sync.CountFilesRecursive(filepath.Join(dstPaths.BaseDir, folder))
+	}
+
+	if verbosity == 0 {
+		pTracker = &sync.ProgressTracker{
+			Label: "Uploading to Google Drive",
+			Total: totalLocalFiles,
+		}
+		pTracker.Print()
+	} else {
+		pTracker = nil
+	}
+
 	for _, folder := range folders {
 		localDir := filepath.Join(dstPaths.BaseDir, folder)
 		_ = filepath.Walk(localDir, func(path string, info os.FileInfo, err error) error {
@@ -351,7 +397,7 @@ func runGoogleDriveSync(dstPaths *sync.Paths, performSync bool, verbosity int) {
 					fmt.Printf("Uploading: %s -> %s\n", rel, flat)
 				}
 				if err := driveSrv.UploadFile(path, flat); err != nil {
-					fmt.Printf("Warning: failed to upload file %s: %v\n", rel, err)
+					fmt.Printf("\nWarning: failed to upload file %s: %v\n", rel, err)
 				} else {
 					uploadStats.SyncedCount++
 				}
@@ -361,8 +407,16 @@ func runGoogleDriveSync(dstPaths *sync.Paths, performSync bool, verbosity int) {
 					fmt.Printf("File already uploaded to Drive, skipping: %s\n", rel)
 				}
 			}
+
+			if pTracker != nil {
+				pTracker.Current++
+				pTracker.Print()
+			}
 			return nil
 		})
+	}
+	if pTracker != nil {
+		pTracker.Finish()
 	}
 
 	// Upload merged history.jsonl

@@ -5,32 +5,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 )
-
-type progressTracker struct {
-	Current int
-	Total   int
-}
-
-func (p *progressTracker) PrintProgress() {
-	if p.Total <= 0 {
-		return
-	}
-	percent := (p.Current * 100) / p.Total
-	if percent > 100 {
-		percent = 100
-	}
-	barWidth := 25
-	filled := (percent * barWidth) / 100
-	bar := strings.Repeat("=", filled) + strings.Repeat(" ", barWidth-filled)
-
-	// Throttle to print every 15 files or on final completion to keep copy operations fast
-	if p.Current%15 == 0 || p.Current == p.Total {
-		fmt.Printf("\rBacking up files: [%s] %d%% (%d/%d)", bar, percent, p.Current, p.Total)
-	}
-}
 
 // BackupActiveState snapshots all active Antigravity databases and logs before starting a sync
 func BackupActiveState(paths *Paths) (string, error) {
@@ -54,7 +30,7 @@ func BackupActiveState(paths *Paths) (string, error) {
 	// 1. First Pass: Count total files to sync
 	totalFiles := 0
 	for _, target := range targets {
-		totalFiles += countFilesRecursive(target.srcPath)
+		totalFiles += CountFilesRecursive(target.srcPath)
 	}
 
 	fmt.Printf("Preparing safety backup (%d files total)...\n", totalFiles)
@@ -62,13 +38,14 @@ func BackupActiveState(paths *Paths) (string, error) {
 		return "", fmt.Errorf("failed to create backup root directory: %w", err)
 	}
 
-	tracker := &progressTracker{
+	tracker := &ProgressTracker{
+		Label:   "Backing up files",
 		Current: 0,
 		Total:   totalFiles,
 	}
 
 	// Print initial progress
-	tracker.PrintProgress()
+	tracker.Print()
 
 	// 2. Second Pass: Copy files recursively with progress updates
 	for _, target := range targets {
@@ -84,11 +61,13 @@ func BackupActiveState(paths *Paths) (string, error) {
 	}
 
 	// Final newline to clear carriage return progress bar
-	fmt.Println("\nPre-sync backup created successfully.")
+	tracker.Finish()
+	fmt.Println("Pre-sync backup created successfully.")
 	return backupDir, nil
 }
 
-func countFilesRecursive(src string) int {
+// CountFilesRecursive counts all files recursively under the given path
+func CountFilesRecursive(src string) int {
 	info, err := os.Stat(src)
 	if err != nil {
 		return 0
@@ -102,12 +81,12 @@ func countFilesRecursive(src string) int {
 	}
 	count := 0
 	for _, entry := range entries {
-		count += countFilesRecursive(filepath.Join(src, entry.Name()))
+		count += CountFilesRecursive(filepath.Join(src, entry.Name()))
 	}
 	return count
 }
 
-func copyRecursiveWithProgress(src, dst string, tracker *progressTracker) error {
+func copyRecursiveWithProgress(src, dst string, tracker *ProgressTracker) error {
 	info, err := os.Stat(src)
 	if err != nil {
 		return err
@@ -153,6 +132,6 @@ func copyRecursiveWithProgress(src, dst string, tracker *progressTracker) error 
 	}
 
 	tracker.Current++
-	tracker.PrintProgress()
+	tracker.Print()
 	return nil
 }
