@@ -246,13 +246,13 @@ func (d *DriveService) DownloadFile(driveName, localPath string) error {
 	return err
 }
 
-// ListAppDataFiles returns all filenames mapped to their IDs in the AppData folder
-func (d *DriveService) ListAppDataFiles() (map[string]string, error) {
-	fileMap := make(map[string]string)
+// ListAppDataFiles returns all filenames mapped to their RemoteFile metadata in the AppData folder
+func (d *DriveService) ListAppDataFiles() (map[string]sync.RemoteFile, error) {
+	fileMap := make(map[string]sync.RemoteFile)
 	pageToken := ""
 
 	for {
-		q := d.Srv.Files.List().Spaces("appDataFolder").Fields("nextPageToken, files(id, name)")
+		q := d.Srv.Files.List().Spaces("appDataFolder").Fields("nextPageToken, files(id, name, md5Checksum, modifiedTime, size)")
 		if pageToken != "" {
 			q = q.PageToken(pageToken)
 		}
@@ -263,7 +263,14 @@ func (d *DriveService) ListAppDataFiles() (map[string]string, error) {
 		}
 
 		for _, f := range res.Files {
-			fileMap[f.Name] = f.Id
+			modTime, _ := time.Parse(time.RFC3339, f.ModifiedTime)
+			fileMap[f.Name] = sync.RemoteFile{
+				ID:           f.Id,
+				Name:         f.Name,
+				MD5:          f.Md5Checksum,
+				ModifiedTime: modTime,
+				Size:         f.Size,
+			}
 		}
 
 		pageToken = res.NextPageToken
@@ -329,7 +336,7 @@ func (d *DriveService) findFileID(name string) (string, error) {
 		if err2 != nil {
 			return "", err
 		}
-		return files[name], nil
+		return files[name].ID, nil
 	}
 
 	if len(res.Files) > 0 {

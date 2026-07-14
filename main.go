@@ -1,8 +1,11 @@
 package main
 
 import (
+	"crypto/md5"
+	"encoding/hex"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -109,12 +112,12 @@ func runLocalFolderSync(srcBase string, dstPaths *sync.Paths, performSync bool, 
 	fmt.Println("\n--- Phase 1: Merging remote history into local active paths ---")
 	for _, f := range folders {
 		srcFolder := filepath.Join(srcBase, f.RelPath)
-		if err := sync.MergeDirectories(srcFolder, f.DstPath, downloadStats, verbosity); err != nil {
+		if err := sync.MergeDirectories(srcFolder, f.DstPath, downloadStats, verbosity, dstPaths); err != nil {
 			fmt.Printf("Warning: error merging directory %s: %v\n", srcFolder, err)
 		}
 	}
 
-	historyResult, err := sync.MergeHistoryJsonl(srcHistory, dstPaths.CliHistoryFile, verbosity)
+	historyResult, err := sync.MergeHistoryJsonl(srcHistory, dstPaths.CliHistoryFile, verbosity, dstPaths)
 	if err != nil {
 		fmt.Printf("Warning: error merging history.jsonl: %v\n", err)
 	}
@@ -123,7 +126,7 @@ func runLocalFolderSync(srcBase string, dstPaths *sync.Paths, performSync bool, 
 	fmt.Println("\n--- Phase 2: Back-propagating changes to source ---")
 	for _, f := range folders {
 		srcFolder := filepath.Join(srcBase, f.RelPath)
-		if err := sync.MergeDirectories(f.DstPath, srcFolder, uploadStats, verbosity); err != nil {
+		if err := sync.MergeDirectories(f.DstPath, srcFolder, uploadStats, verbosity, dstPaths); err != nil {
 			fmt.Printf("Warning: error back-propagating directory %s: %v\n", srcFolder, err)
 		}
 	}
@@ -325,7 +328,21 @@ func runGoogleDriveSync(dstPaths *sync.Paths, performSync bool, verbosity int) {
 				rel := drive.RelPath(name)
 				localPath := filepath.Join(dstPaths.BaseDir, rel)
 
-				if _, err := os.Stat(localPath); os.IsNotExist(err) {
+				remoteFile := remoteFiles[name]
+				shouldDownload := false
+				info, err := os.Stat(localPath)
+				if os.IsNotExist(err) {
+					shouldDownload = true
+				} else if err == nil {
+					localMD5, err := getLocalFileMD5(localPath)
+					if err == nil && localMD5 != remoteFile.MD5 {
+						if remoteFile.ModifiedTime.After(info.ModTime()) {
+							shouldDownload = true
+						}
+					}
+				}
+
+				if shouldDownload {
 					if verbosity >= 1 {
 						fmt.Printf("Downloading: %s -> %s\n", name, localPath)
 					}
@@ -333,11 +350,17 @@ func runGoogleDriveSync(dstPaths *sync.Paths, performSync bool, verbosity int) {
 						fmt.Printf("\nWarning: failed to download file %s: %v\n", name, err)
 					} else {
 						downloadStats.SyncedCount++
+						// If database file, translate paths after downloading
+						if strings.HasSuffix(localPath, ".db") {
+							if err := sync.TranslateDbFile(localPath, dstPaths); err != nil && verbosity >= 1 {
+								fmt.Printf("Warning: failed to translate DB file %s: %v\n", localPath, err)
+							}
+						}
 					}
 				} else {
 					downloadStats.UnchangedCount++
 					if verbosity >= 2 {
-						fmt.Printf("File already exists locally, skipping: %s\n", localPath)
+						fmt.Printf("File already up to date, skipping: %s\n", localPath)
 					}
 				}
 
@@ -357,7 +380,7 @@ func runGoogleDriveSync(dstPaths *sync.Paths, performSync bool, verbosity int) {
 	if _, ok := remoteFiles["history.jsonl"]; ok {
 		tempLocalHistory := filepath.Join(os.TempDir(), "agysync_temp_hist.jsonl")
 		if err := driveSrv.DownloadFile("history.jsonl", tempLocalHistory); err == nil {
-			historyResult, _ = sync.MergeHistoryJsonl(tempLocalHistory, dstPaths.CliHistoryFile, verbosity)
+			historyResult, _ = sync.MergeHistoryJsonl(tempLocalHistory, dstPaths.CliHistoryFile, verbosity, dstPaths)
 			_ = os.Remove(tempLocalHistory)
 		}
 	}
@@ -392,19 +415,48 @@ func runGoogleDriveSync(dstPaths *sync.Paths, performSync bool, verbosity int) {
 			rel, _ := filepath.Rel(dstPaths.BaseDir, path)
 			flat := drive.FlatName(rel)
 
-			if _, exists := remoteFiles[flat]; !exists {
+			remoteFile, exists := remoteFiles[flat]
+			shouldUpload := false
+			if !exists {
+				shouldUpload = true
+			} else {
+				localMD5, err := getLocalFileMD5(path)
+				if err == nil && localMD5 != remoteFile.MD5 {
+					if info.ModTime().After(remoteFile.ModifiedTime) {
+						shouldUpload = true
+					}
+				}
+			}
+
+			if shouldUpload {
 				if verbosity >= 1 {
 					fmt.Printf("Uploading: %s -> %s\n", rel, flat)
 				}
-				if err := driveSrv.UploadFile(path, flat); err != nil {
+
+				uploadPath := path
+				var tempDbPath string
+				if strings.HasSuffix(path, ".db") {
+					tempDbPath = filepath.Join(os.TempDir(), "agysync_temp_upload_"+info.Name())
+					if err := sync.CopyFileOverwrite(path, tempDbPath); err == nil {
+						if err := sync.CanonicalizeDbFile(tempDbPath, dstPaths); err == nil {
+							uploadPath = tempDbPath
+						}
+					}
+				}
+
+				if err := driveSrv.UploadFile(uploadPath, flat); err != nil {
 					fmt.Printf("\nWarning: failed to upload file %s: %v\n", rel, err)
 				} else {
 					uploadStats.SyncedCount++
 				}
+
+				if tempDbPath != "" {
+					_ = os.Remove(tempDbPath)
+				}
 			} else {
 				uploadStats.UnchangedCount++
 				if verbosity >= 2 {
-					fmt.Printf("File already uploaded to Drive, skipping: %s\n", rel)
+					fmt.Printf("File already up to date in Drive, skipping: %s\n", rel)
 				}
 			}
 
@@ -419,10 +471,18 @@ func runGoogleDriveSync(dstPaths *sync.Paths, performSync bool, verbosity int) {
 		pTracker.Finish()
 	}
 
-	// Upload merged history.jsonl
+	// Upload merged and canonicalized history.jsonl
 	if _, err := os.Stat(dstPaths.CliHistoryFile); err == nil {
-		if err := driveSrv.UploadFile(dstPaths.CliHistoryFile, "history.jsonl"); err != nil {
-			fmt.Printf("Warning: failed to upload merged history.jsonl: %v\n", err)
+		tempHistFile := filepath.Join(os.TempDir(), "agysync_temp_upload_history.jsonl")
+		if err := sync.CanonicalizeHistoryJsonl(dstPaths.CliHistoryFile, tempHistFile); err == nil {
+			if err := driveSrv.UploadFile(tempHistFile, "history.jsonl"); err != nil {
+				fmt.Printf("Warning: failed to upload merged history.jsonl: %v\n", err)
+			}
+			_ = os.Remove(tempHistFile)
+		} else {
+			if err := driveSrv.UploadFile(dstPaths.CliHistoryFile, "history.jsonl"); err != nil {
+				fmt.Printf("Warning: failed to upload merged history.jsonl (fallback): %v\n", err)
+			}
 		}
 	}
 
@@ -460,3 +520,18 @@ func runGoogleDriveSync(dstPaths *sync.Paths, performSync bool, verbosity int) {
 	}
 	fmt.Println("====================")
 }
+
+func getLocalFileMD5(filePath string) (string, error) {
+	f, err := os.Open(filePath)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+
+	h := md5.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
