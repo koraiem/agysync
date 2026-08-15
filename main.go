@@ -20,6 +20,7 @@ func main() {
 	syncFlag := flag.Bool("sync", false, "Perform the bidirectional sync (with backup, propagation, and logs)")
 	verboseSyncedFlag := flag.Bool("v", false, "Show only synced (copied) files during execution")
 	verboseAllFlag := flag.Bool("vv", false, "Show all files checked (copied and skipped) during execution")
+	translateFlag := flag.Bool("translate", false, "Force translate/localize all local SQLite database conversation paths")
 
 	// Custom Usage
 	flag.Usage = func() {
@@ -62,6 +63,37 @@ func main() {
 	}
 	if *verboseAllFlag {
 		verbosity = 2
+	}
+
+	if *translateFlag {
+		fmt.Println("\nAction: Force translating local SQLite conversation paths...")
+		count := 0
+		for _, folder := range []string{"antigravity-ide/conversations", "antigravity/conversations", "antigravity-cli/conversations"} {
+			dir := filepath.Join(dstPaths.BaseDir, folder)
+			_ = filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+				if err == nil && !info.IsDir() && strings.HasSuffix(path, ".db") {
+					if err := sync.TranslateDbFile(path, dstPaths); err != nil {
+						fmt.Printf("Error translating %s: %v\n", path, err)
+					} else {
+						count++
+						if verbosity >= 1 {
+							fmt.Printf("Translated: %s\n", path)
+						}
+					}
+				}
+				return nil
+			})
+		}
+		fmt.Printf("Finished! Checked and translated %d database file(s).\n", count)
+		
+		fmt.Println("\nAction: Updating Antigravity IDE past conversations index...")
+		ideCount, err := sync.SyncIdeTrajectorySummaries(dstPaths, verbosity)
+		if err != nil {
+			fmt.Printf("Warning: error updating Antigravity IDE past conversations: %v\n", err)
+		} else {
+			fmt.Printf("Finished! Synchronized Antigravity IDE past conversations index (%d conversation(s) processed).\n", ideCount)
+		}
+		return
 	}
 
 	// 1. Differentiate execution paths: Local Sync vs Google Drive Sync
@@ -120,6 +152,13 @@ func runLocalFolderSync(srcBase string, dstPaths *sync.Paths, performSync bool, 
 	historyResult, err := sync.MergeHistoryJsonl(srcHistory, dstPaths.CliHistoryFile, verbosity, dstPaths)
 	if err != nil {
 		fmt.Printf("Warning: error merging history.jsonl: %v\n", err)
+	}
+
+	// Update Antigravity IDE past conversations index
+	if ideCount, err := sync.SyncIdeTrajectorySummaries(dstPaths, verbosity); err != nil {
+		fmt.Printf("Warning: error updating Antigravity IDE past conversations index: %v\n", err)
+	} else if verbosity >= 1 && ideCount > 0 {
+		fmt.Printf("Synchronized %d past conversation(s) into Antigravity IDE index.\n", ideCount)
 	}
 
 	// Phase 2: Upload/Propagate
@@ -383,6 +422,13 @@ func runGoogleDriveSync(dstPaths *sync.Paths, performSync bool, verbosity int) {
 			historyResult, _ = sync.MergeHistoryJsonl(tempLocalHistory, dstPaths.CliHistoryFile, verbosity, dstPaths)
 			_ = os.Remove(tempLocalHistory)
 		}
+	}
+
+	// Update Antigravity IDE past conversations index
+	if ideCount, err := sync.SyncIdeTrajectorySummaries(dstPaths, verbosity); err != nil {
+		fmt.Printf("Warning: error updating Antigravity IDE past conversations index: %v\n", err)
+	} else if verbosity >= 1 && ideCount > 0 {
+		fmt.Printf("Synchronized %d past conversation(s) into Antigravity IDE index.\n", ideCount)
 	}
 
 	// Phase 2: Upload & Propagate to Google Drive
