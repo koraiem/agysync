@@ -23,3 +23,8 @@ Thumbs.db
 
 # Internal planning & development specs
 sync_app_spec.md
+
+# Reports, logs & dryrun outputs
+dryrun*
+*.log
+
