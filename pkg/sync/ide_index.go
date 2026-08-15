@@ -614,6 +614,53 @@ func SyncIdeTrajectorySummaries(paths *Paths, verbosity int) (int, error) {
 		return 0, fmt.Errorf("sqlite3 CLI is required to update IDE state database")
 	}
 
+	// Cross-populate all conversation .db files and brain directories into IdeConversations & IdeBrain
+	_ = os.MkdirAll(paths.IdeConversations, 0755)
+	_ = os.MkdirAll(paths.IdeBrain, 0755)
+
+	sourceConvFolders := []string{paths.CoreConversations, paths.CliConversations}
+	for _, srcFolder := range sourceConvFolders {
+		if _, err := os.Stat(srcFolder); err == nil {
+			_ = filepath.Walk(srcFolder, func(p string, info os.FileInfo, err error) error {
+				if err == nil && !info.IsDir() && strings.HasSuffix(p, ".db") {
+					targetPath := filepath.Join(paths.IdeConversations, info.Name())
+					if _, err := os.Stat(targetPath); os.IsNotExist(err) {
+						if err := CopyFileOverwrite(p, targetPath); err == nil {
+							_ = os.Chmod(targetPath, 0644)
+							_ = TranslateDbFile(targetPath, paths)
+						}
+					}
+				}
+				return nil
+			})
+		}
+	}
+
+	sourceBrainFolders := []string{paths.CoreBrain, paths.CliBrain}
+	for _, srcBrain := range sourceBrainFolders {
+		if entries, err := os.ReadDir(srcBrain); err == nil {
+			for _, entry := range entries {
+				if entry.IsDir() {
+					targetBrain := filepath.Join(paths.IdeBrain, entry.Name())
+					if _, err := os.Stat(targetBrain); os.IsNotExist(err) {
+						_ = MergeDirectories(filepath.Join(srcBrain, entry.Name()), targetBrain, &SyncStats{}, 0, paths)
+					}
+				}
+			}
+		}
+	}
+
+	// Clean up any stale root .db-shm or .db-wal files in IdeConversations
+	if entries, err := os.ReadDir(paths.IdeConversations); err == nil {
+		for _, entry := range entries {
+			name := entry.Name()
+			if strings.HasSuffix(name, ".db-shm") || strings.HasSuffix(name, ".db-wal") {
+				// remove stale journal files
+				_ = os.Remove(filepath.Join(paths.IdeConversations, name))
+			}
+		}
+	}
+
 	// Discover all conversation .db files
 	var convDbPaths []string
 	folders := []string{paths.IdeConversations, paths.CoreConversations, paths.CliConversations}
