@@ -78,23 +78,43 @@ func GetDriveService(paths *sync.Paths) (*DriveService, error) {
 }
 
 func getOrPromptToken(paths *sync.Paths, config *oauth2.Config) (*oauth2.Token, error) {
-	// 1. Try reading existing token
+	ctx := context.Background()
+
+	// 1. Try reading and validating existing token
 	if _, err := os.Stat(paths.TokenFile); err == nil {
 		data, err := os.ReadFile(paths.TokenFile)
 		if err == nil {
 			var token oauth2.Token
 			if err := json.Unmarshal(data, &token); err == nil {
-				return &token, nil
+				// Validate token and test refresh validity
+				ts := config.TokenSource(ctx, &token)
+				validToken, err := ts.Token()
+				if err == nil && validToken != nil {
+					// Update token file if token was refreshed
+					if validToken.AccessToken != token.AccessToken {
+						if tokenData, err := json.Marshal(validToken); err == nil {
+							_ = os.WriteFile(paths.TokenFile, tokenData, 0600)
+						}
+					}
+					return validToken, nil
+				}
+				fmt.Println("\n[Notice] Stored Google OAuth token has expired or is invalid.")
+				fmt.Println("[Notice] Initiating browser login to re-authenticate...")
+				_ = os.Remove(paths.TokenFile)
 			}
 		}
 	}
 
-	// 2. No token found, perform OAuth2 flow
+	// 2. Prompt for a fresh token
+	return promptNewToken(paths, config)
+}
+
+func promptNewToken(paths *sync.Paths, config *oauth2.Config) (*oauth2.Token, error) {
 	authURL := config.AuthCodeURL("state-token", oauth2.AccessTypeOffline, oauth2.ApprovalForce)
-	fmt.Printf("Authorize AgySync by visiting this link in your browser:\n\n%s\n\n", authURL)
-	fmt.Println("Please log in, grant access, and copy the code.")
-	fmt.Println("If the local browser callback completes, this will continue automatically.")
-	fmt.Println("Otherwise, paste the authorization code here:")
+	fmt.Printf("\nAuthorize AgySync by visiting this link in your browser:\n\n%s\n\n", authURL)
+	fmt.Println("Please log in, grant access, and approve permissions.")
+	fmt.Println("If the local browser callback completes, authentication will finish automatically.")
+	fmt.Println("Otherwise, paste the authorization code below:")
 	fmt.Print("Enter Code: ")
 
 	codeChan := make(chan string)
@@ -134,13 +154,11 @@ func getOrPromptToken(paths *sync.Paths, config *oauth2.Config) (*oauth2.Token, 
 	select {
 	case code = <-codeChan:
 		fmt.Println("\nAuthentication received via browser callback!")
-		// Shutdown server
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		_ = server.Shutdown(ctx)
 	case code = <-stdinChan:
 		fmt.Println("\nAuthentication code received via terminal input!")
-		// Shutdown server
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		_ = server.Shutdown(ctx)
