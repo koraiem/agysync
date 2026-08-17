@@ -640,7 +640,7 @@ func SyncIdeTrajectorySummaries(paths *Paths, verbosity int) (int, error) {
 	for _, srcBrain := range sourceBrainFolders {
 		if entries, err := os.ReadDir(srcBrain); err == nil {
 			for _, entry := range entries {
-				if entry.IsDir() {
+				if entry.IsDir() && !ShouldIgnoreSyncPath(entry.Name()) {
 					targetBrain := filepath.Join(paths.IdeBrain, entry.Name())
 					if _, err := os.Stat(targetBrain); os.IsNotExist(err) {
 						_ = MergeDirectories(filepath.Join(srcBrain, entry.Name()), targetBrain, &SyncStats{}, 0, paths)

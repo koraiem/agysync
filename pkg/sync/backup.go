@@ -70,6 +70,9 @@ func BackupActiveState(paths *Paths) (string, error) {
 
 // CountFilesRecursive counts all files recursively under the given path
 func CountFilesRecursive(src string) int {
+	if ShouldIgnoreSyncPath(src) {
+		return 0
+	}
 	info, err := os.Stat(src)
 	if err != nil {
 		return 0
@@ -83,12 +86,18 @@ func CountFilesRecursive(src string) int {
 	}
 	count := 0
 	for _, entry := range entries {
+		if ShouldIgnoreSyncPath(entry.Name()) {
+			continue
+		}
 		count += CountFilesRecursive(filepath.Join(src, entry.Name()))
 	}
 	return count
 }
 
 func copyIncrementalRecursive(src, dst string, tracker *ProgressTracker) (int, error) {
+	if ShouldIgnoreSyncPath(src) {
+		return 0, nil
+	}
 	srcInfo, err := os.Stat(src)
 	if err != nil {
 		return 0, err
@@ -104,6 +113,9 @@ func copyIncrementalRecursive(src, dst string, tracker *ProgressTracker) (int, e
 		}
 		totalCopied := 0
 		for _, entry := range entries {
+			if ShouldIgnoreSyncPath(entry.Name()) {
+				continue
+			}
 			srcChild := filepath.Join(src, entry.Name())
 			dstChild := filepath.Join(dst, entry.Name())
 			copied, err := copyIncrementalRecursive(srcChild, dstChild, tracker)

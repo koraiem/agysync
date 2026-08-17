@@ -76,6 +76,23 @@ func copyFileInternal(src, dst string, flags int) error {
 	return err
 }
 
+// ShouldIgnoreSyncPath returns true for files and directories that should not be synced,
+// such as git internal objects (.git), OS metadata (.DS_Store), and temporary SQLite locks.
+func ShouldIgnoreSyncPath(path string) bool {
+	base := filepath.Base(path)
+	if base == ".git" || base == ".DS_Store" || base == "ehthumbs.db" || base == "Thumbs.db" ||
+		strings.HasSuffix(base, ".db-shm") || strings.HasSuffix(base, ".db-wal") {
+		return true
+	}
+	parts := strings.Split(filepath.ToSlash(path), "/")
+	for _, part := range parts {
+		if part == ".git" {
+			return true
+		}
+	}
+	return false
+}
+
 // MergeDirectories recursively merges srcDir into dstDir without overwriting existing files.
 func MergeDirectories(srcDir, dstDir string, stats *SyncStats, verbosity int, paths *Paths) error {
 	entries, err := os.ReadDir(srcDir)
@@ -92,6 +109,10 @@ func MergeDirectories(srcDir, dstDir string, stats *SyncStats, verbosity int, pa
 	}
 
 	for _, entry := range entries {
+		if ShouldIgnoreSyncPath(entry.Name()) {
+			continue
+		}
+
 		srcPath := filepath.Join(srcDir, entry.Name())
 		dstPath := filepath.Join(dstDir, entry.Name())
 

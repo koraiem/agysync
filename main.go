@@ -71,7 +71,19 @@ func main() {
 		for _, folder := range []string{"antigravity-ide/conversations", "antigravity/conversations", "antigravity-cli/conversations"} {
 			dir := filepath.Join(dstPaths.BaseDir, folder)
 			_ = filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
-				if err == nil && !info.IsDir() && strings.HasSuffix(path, ".db") {
+				if err != nil {
+					return nil
+				}
+				if sync.ShouldIgnoreSyncPath(path) {
+					if info.IsDir() {
+						return filepath.SkipDir
+					}
+					return nil
+				}
+				if info.IsDir() {
+					return nil
+				}
+				if strings.HasSuffix(path, ".db") {
 					if err := sync.TranslateDbFile(path, dstPaths); err != nil {
 						fmt.Printf("Error translating %s: %v\n", path, err)
 					} else {
@@ -263,7 +275,16 @@ func runGoogleDriveSync(dstPaths *sync.Paths, performSync bool, verbosity int) {
 			// Checks what files we would upload
 			var missingOnDrive []string
 			_ = filepath.Walk(localDir, func(path string, info os.FileInfo, err error) error {
-				if err != nil || info.IsDir() {
+				if err != nil {
+					return nil
+				}
+				if sync.ShouldIgnoreSyncPath(path) {
+					if info.IsDir() {
+						return filepath.SkipDir
+					}
+					return nil
+				}
+				if info.IsDir() {
 					return nil
 				}
 				rel, _ := filepath.Rel(dstPaths.BaseDir, path)
@@ -455,7 +476,16 @@ func runGoogleDriveSync(dstPaths *sync.Paths, performSync bool, verbosity int) {
 	for _, folder := range folders {
 		localDir := filepath.Join(dstPaths.BaseDir, folder)
 		_ = filepath.Walk(localDir, func(path string, info os.FileInfo, err error) error {
-			if err != nil || info.IsDir() {
+			if err != nil {
+				return nil
+			}
+			if sync.ShouldIgnoreSyncPath(path) {
+				if info.IsDir() {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			if info.IsDir() {
 				return nil
 			}
 			rel, _ := filepath.Rel(dstPaths.BaseDir, path)

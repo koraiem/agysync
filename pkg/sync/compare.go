@@ -73,6 +73,12 @@ func getFilesMissingInDst(srcDir, dstDir string) ([]string, error) {
 			}
 			return err
 		}
+		if ShouldIgnoreSyncPath(path) {
+			if info.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
 		if info.IsDir() {
 			return nil
 		}
