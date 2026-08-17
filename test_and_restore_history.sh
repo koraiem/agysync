@@ -106,6 +106,13 @@ else
     record_fail "QA 1b: CLI Help Command Response" "Binary did not respond to -h"
 fi
 
+# Test -autoclean flag presence
+if "${AGYSYNC_BIN}" -h 2>&1 | grep -q "autoclean"; then
+    record_pass "QA 1c: -autoclean Flag Availability"
+else
+    record_fail "QA 1c: -autoclean Flag Availability" "-autoclean flag not listed in help output"
+fi
+
 # --- STEP 1: Backup Current Active Environment ---
 prompt_step 1 "Create Safety Snapshot of Current Environment"
 echo "Creating backup of active history directories at ${CURRENT_BACKUP}..."

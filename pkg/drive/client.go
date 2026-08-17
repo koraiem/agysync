@@ -264,6 +264,11 @@ func (d *DriveService) DownloadFile(driveName, localPath string) error {
 	return err
 }
 
+// DeleteFile deletes a file from Google Drive AppData folder by its file ID
+func (d *DriveService) DeleteFile(fileID string) error {
+	return d.Srv.Files.Delete(fileID).Do()
+}
+
 // ListAppDataFiles returns all filenames mapped to their RemoteFile metadata in the AppData folder
 func (d *DriveService) ListAppDataFiles() (map[string]sync.RemoteFile, error) {
 	fileMap := make(map[string]sync.RemoteFile)

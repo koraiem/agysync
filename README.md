@@ -233,6 +233,7 @@ export AGYSYNC_CLIENT_SECRET="GOCSPX-your_client_secret"
 | :--- | :--- |
 | **`-src <path>`** | Specifies local source backup folder (offline/fallback mode). |
 | **`-sync`** | Executes bidirectional synchronization with automated backups and back-propagation. When omitted, runs in **Dry-Run Mode** (read-only comparison report). |
+| **`-autoclean`** | Prunes ignored/unnecessary files (`.git`, `.DS_Store`, stale lock files) from Google Drive AppData or backup destination. |
 | **`-translate`** | Standalone pass to force-translate all local conversation databases to the current machine's paths and synchronize Antigravity IDE's `state.vscdb` index. |
 | **`-v`** | Verbose synced mode: lists all files, databases, and commands modified or synced. |
 | **`-vv`** | Verbose all mode: lists every scanned file, including unchanged and skipped files. |

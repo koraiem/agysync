@@ -18,6 +18,7 @@ import (
 func main() {
 	srcBaseFlag := flag.String("src", "", "Path to backup source .gemini folder (local folder sync mode fallback)")
 	syncFlag := flag.Bool("sync", false, "Perform the bidirectional sync (with backup, propagation, and logs)")
+	autocleanFlag := flag.Bool("autoclean", false, "Prune ignored/unnecessary files (.git, .DS_Store, stale locks) from Google Drive AppData or destination")
 	verboseSyncedFlag := flag.Bool("v", false, "Show only synced (copied) files during execution")
 	verboseAllFlag := flag.Bool("vv", false, "Show all files checked (copied and skipped) during execution")
 	translateFlag := flag.Bool("translate", false, "Force translate/localize all local SQLite database conversation paths")
@@ -32,10 +33,10 @@ func main() {
 		fmt.Println("  1. Dry-run Google Drive Sync (Simulate Drive sync and show comparison report):")
 		fmt.Println("     agysync")
 		fmt.Println("\n  2. Perform Google Drive Sync (Syncs to Google Drive AppData folder, requires OAuth2):")
-		fmt.Println("     export AGYSYNC_CLIENT_ID=\"your_id\"")
-		fmt.Println("     export AGYSYNC_CLIENT_SECRET=\"your_secret\"")
 		fmt.Println("     agysync -sync")
-		fmt.Println("\n  3. Local Folder Sync Mode (Fallback / Offline sync):")
+		fmt.Println("\n  3. Perform Google Drive Sync & Prune Ignored Files (.git, .DS_Store):")
+		fmt.Println("     agysync -sync -autoclean")
+		fmt.Println("\n  4. Local Folder Sync Mode (Fallback / Offline sync):")
 		fmt.Println("     agysync -src /path/to/backup/.gemini -sync")
 		fmt.Println("\nSafety Features:")
 		fmt.Println("  - Pre-sync Backup: AgySync automatically archives your active configuration to ~/.gemini/agysync_backups/")
@@ -110,14 +111,14 @@ func main() {
 
 	// 1. Differentiate execution paths: Local Sync vs Google Drive Sync
 	if *srcBaseFlag != "" {
-		runLocalFolderSync(*srcBaseFlag, dstPaths, *syncFlag, verbosity)
+		runLocalFolderSync(*srcBaseFlag, dstPaths, *syncFlag, verbosity, *autocleanFlag)
 		return
 	}
 
-	runGoogleDriveSync(dstPaths, *syncFlag, verbosity)
+	runGoogleDriveSync(dstPaths, *syncFlag, verbosity, *autocleanFlag)
 }
 
-func runLocalFolderSync(srcBase string, dstPaths *sync.Paths, performSync bool, verbosity int) {
+func runLocalFolderSync(srcBase string, dstPaths *sync.Paths, performSync bool, verbosity int, autoClean bool) {
 	fmt.Println("\nMode: Local Folder Sync (Fallback)")
 
 	folders := []sync.FolderMap{
@@ -186,6 +187,28 @@ func runLocalFolderSync(srcBase string, dstPaths *sync.Paths, performSync bool, 
 		fmt.Printf("Warning: error back-propagating history.jsonl: %v\n", err)
 	}
 
+	prunedLocalCount := 0
+	if autoClean {
+		for _, f := range folders {
+			srcFolder := filepath.Join(srcBase, f.RelPath)
+			_ = filepath.Walk(srcFolder, func(path string, info os.FileInfo, err error) error {
+				if err != nil {
+					return nil
+				}
+				if sync.ShouldIgnoreSyncPath(path) {
+					if info.IsDir() {
+						_ = os.RemoveAll(path)
+						prunedLocalCount++
+						return filepath.SkipDir
+					}
+					_ = os.Remove(path)
+					prunedLocalCount++
+				}
+				return nil
+			})
+		}
+	}
+
 	// Print final stats summary
 	fmt.Println("\n=== Sync Summary ===")
 	fmt.Printf("Kept %d files unchanged, downloaded %d new files from backup, uploaded %d files to backup.\n",
@@ -194,10 +217,13 @@ func runLocalFolderSync(srcBase string, dstPaths *sync.Paths, performSync bool, 
 		fmt.Printf("CLI History: imported %d new commands, exported %d new commands.\n",
 			historyResult.ImportedCount, historyResult.ExportedCount)
 	}
+	if autoClean {
+		fmt.Printf("Autoclean: pruned %d ignored file(s) from backup source.\n", prunedLocalCount)
+	}
 	fmt.Println("====================")
 }
 
-func runGoogleDriveSync(dstPaths *sync.Paths, performSync bool, verbosity int) {
+func runGoogleDriveSync(dstPaths *sync.Paths, performSync bool, verbosity int, autoClean bool) {
 	fmt.Println("\nMode: Google Drive Cloud Sync")
 
 	// 1. Load Local Machine Identity
@@ -339,6 +365,28 @@ func runGoogleDriveSync(dstPaths *sync.Paths, performSync bool, verbosity int) {
 			_ = os.Remove(tempLocalHistory)
 		} else {
 			fmt.Println("  No remote command history file found in Google Drive AppData.")
+		}
+
+		// Ignored files report on Drive
+		var ignoredRemoteFiles []sync.RemoteFile
+		for name, file := range remoteFiles {
+			rel := drive.RelPath(name)
+			if sync.ShouldIgnoreSyncPath(rel) {
+				ignoredRemoteFiles = append(ignoredRemoteFiles, file)
+			}
+		}
+
+		if len(ignoredRemoteFiles) > 0 {
+			if autoClean {
+				fmt.Printf("\n  🗑️ [Autoclean] Would prune %d ignored/unnecessary file(s) from Google Drive (.git, .DS_Store, stale locks):\n", len(ignoredRemoteFiles))
+				if verbosity >= 1 {
+					for _, f := range ignoredRemoteFiles {
+						fmt.Printf("    - %s\n", drive.RelPath(f.Name))
+					}
+				}
+			} else {
+				fmt.Printf("\n  ℹ️ [Autoclean Info] Found %d ignored/unnecessary file(s) on Google Drive (.git, .DS_Store). Run with -autoclean -sync to prune them.\n", len(ignoredRemoteFiles))
+			}
 		}
 
 		fmt.Println("\n=======================================")
@@ -562,6 +610,50 @@ func runGoogleDriveSync(dstPaths *sync.Paths, performSync bool, verbosity int) {
 		}
 	}
 
+	// Phase 3: Pruning ignored files from Google Drive AppData (Only if -autoclean is passed)
+	prunedDriveCount := 0
+	if autoClean {
+		var ignoredRemoteFiles []sync.RemoteFile
+		for name, file := range remoteFiles {
+			rel := drive.RelPath(name)
+			if sync.ShouldIgnoreSyncPath(rel) {
+				ignoredRemoteFiles = append(ignoredRemoteFiles, file)
+			}
+		}
+
+		if len(ignoredRemoteFiles) > 0 {
+			if verbosity > 0 {
+				fmt.Printf("\n--- Phase 3: Pruning %d ignored file(s) from Google Drive AppData ---\n", len(ignoredRemoteFiles))
+			}
+			var pruneTracker *sync.ProgressTracker
+			if verbosity == 0 {
+				pruneTracker = &sync.ProgressTracker{
+					Label: "Pruning ignored files from Google Drive",
+					Total: len(ignoredRemoteFiles),
+				}
+				pruneTracker.Print()
+			}
+
+			for _, file := range ignoredRemoteFiles {
+				if verbosity >= 1 {
+					fmt.Printf("Pruning from Drive: %s\n", drive.RelPath(file.Name))
+				}
+				if err := driveSrv.DeleteFile(file.ID); err != nil {
+					fmt.Printf("\nWarning: failed to delete file %s from Drive: %v\n", file.Name, err)
+				} else {
+					prunedDriveCount++
+				}
+				if pruneTracker != nil {
+					pruneTracker.Current++
+					pruneTracker.Print()
+				}
+			}
+			if pruneTracker != nil {
+				pruneTracker.Finish()
+			}
+		}
+	}
+
 	// 6. Write and upload shared sync log
 	importedCount := 0
 	exportedCount := 0
@@ -578,6 +670,7 @@ func runGoogleDriveSync(dstPaths *sync.Paths, performSync bool, verbosity int) {
 		"files_unchanged":   downloadStats.UnchangedCount,
 		"files_downloaded":  downloadStats.SyncedCount,
 		"files_uploaded":    uploadStats.SyncedCount,
+		"files_pruned":      prunedDriveCount,
 		"commands_imported": importedCount,
 		"commands_exported": exportedCount,
 	}
@@ -593,6 +686,9 @@ func runGoogleDriveSync(dstPaths *sync.Paths, performSync bool, verbosity int) {
 	if historyResult != nil {
 		fmt.Printf("CLI History: imported %d new commands, exported %d new commands.\n",
 			historyResult.ImportedCount, historyResult.ExportedCount)
+	}
+	if autoClean {
+		fmt.Printf("Autoclean: pruned %d ignored file(s) from Google Drive.\n", prunedDriveCount)
 	}
 	fmt.Println("====================")
 }
