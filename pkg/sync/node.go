@@ -91,12 +91,24 @@ func LoadLocalSettings(paths *Paths) (*MachineConfig, error) {
 	}
 
 	// Save defaults
-	data, err := json.MarshalIndent(config, "", "  ")
-	if err == nil {
-		_ = os.WriteFile(paths.SettingsFile, data, 0644)
-	}
+	_ = SaveLocalSettings(paths, config)
 
 	return config, nil
+}
+
+// SaveLocalSettings writes the MachineConfig (including OAuth ClientID and ClientSecret) to settings.json
+func SaveLocalSettings(paths *Paths, config *MachineConfig) error {
+	if config == nil {
+		return fmt.Errorf("nil machine config")
+	}
+	if err := os.MkdirAll(paths.ConfigDir, 0755); err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(config, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(paths.SettingsFile, data, 0600)
 }
 
 // RegisterAndValidateNode validates if the machine can sync, enforcing free/paid tier limits

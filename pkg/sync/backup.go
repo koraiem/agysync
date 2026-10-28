@@ -16,14 +16,39 @@ func BackupActiveState(paths *Paths) (string, error) {
 		relPath string
 		srcPath string
 	}{
+		{"config/projects", paths.ProjectsConfigDir},
 		{"antigravity/conversations", paths.CoreConversations},
 		{"antigravity/brain", paths.CoreBrain},
+		{"antigravity/annotations", paths.CoreAnnotations},
+		{"antigravity/agyhub_summaries_proto.pb", paths.CoreSummariesPb},
+		{"antigravity/conversation_summaries.db", paths.CoreSummariesDb},
 		{"antigravity-cli/conversations", paths.CliConversations},
 		{"antigravity-cli/brain", paths.CliBrain},
+		{"antigravity-cli/annotations", paths.CliAnnotations},
+		{"antigravity-cli/conversation_summaries.db", paths.CliSummariesDb},
 		{"antigravity-ide/conversations", paths.IdeConversations},
 		{"antigravity-ide/brain", paths.IdeBrain},
 		{"history", paths.WorkspaceHistory},
 		{"antigravity-cli/history.jsonl", paths.CliHistoryFile},
+	}
+
+	for i, appStorage := range paths.DesktopAppStorageFiles {
+		targets = append(targets, struct {
+			relPath string
+			srcPath string
+		}{
+			relPath: fmt.Sprintf("desktop_state/app_storage_%d.json", i),
+			srcPath: appStorage,
+		})
+	}
+	for i, vscdb := range paths.IdeStateVscdbFiles {
+		targets = append(targets, struct {
+			relPath string
+			srcPath string
+		}{
+			relPath: fmt.Sprintf("ide_state/state_%d.vscdb", i),
+			srcPath: vscdb,
+		})
 	}
 
 	// 1. First Pass: Count total files to check

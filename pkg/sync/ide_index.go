@@ -24,6 +24,14 @@ func DetectIdeVscdbPaths() []string {
 	if err != nil {
 		return nil
 	}
+	return DetectIdeVscdbPathsForHome(home)
+}
+
+// DetectIdeVscdbPathsForHome locates state.vscdb files for a specific home directory
+func DetectIdeVscdbPathsForHome(home string) []string {
+	if home == "" {
+		return nil
+	}
 
 	var candidates []string
 	switch runtime.GOOS {
@@ -63,20 +71,30 @@ func DetectIdeVscdbPaths() []string {
 
 // IdeConversationInfo holds extracted metadata for a single conversation
 type IdeConversationInfo struct {
-	CascadeID        string
-	TrajectoryID     string
-	Title            string
-	WorkspaceURI     string
-	GitRepo          string
-	GitURL           string
-	GitBranch        string
-	StepCount        int64
-	CreatedSec       int64
-	CreatedNano      int64
-	LastModSec       int64
-	LastModNano      int64
-	LastUserInputSec int64
+	CascadeID         string
+	TrajectoryID      string
+	Title             string
+	AnnotationTitle   string
+	RawWorkspaceURI   string
+	WorkspaceURI      string
+	ProjectID         string
+	GitRepo           string
+	GitURL            string
+	GitBranch         string
+	StepCount         int64
+	Status            int64
+	Source            int64
+	CreatedSec        int64
+	CreatedNano       int64
+	LastModSec        int64
+	LastModNano       int64
+	LastUserInputSec  int64
 	LastUserInputNano int64
+	LastUserInputStep int64
+	LastViewSec       int64
+	LastViewNano      int64
+	RawMetadataBlob   []byte
+	RawSummaryBlob    []byte
 }
 
 // ParseConversationDb extracts conversation metadata from a local conversation .db file
@@ -142,6 +160,7 @@ func ParseConversationDb(dbPath string, paths *Paths) (*IdeConversationInfo, err
 		if hexStr != "" {
 			blobBytes, err := hex.DecodeString(hexStr)
 			if err == nil {
+				info.RawMetadataBlob = blobBytes
 				parseTrajectoryMetadataBlob(blobBytes, info)
 			}
 		}
@@ -151,12 +170,13 @@ func ParseConversationDb(dbPath string, paths *Paths) (*IdeConversationInfo, err
 	info.Title = extractConversationTitle(info.CascadeID, dbPath, paths)
 
 	// 5. Localize Workspace URI
+	info.RawWorkspaceURI = info.WorkspaceURI
 	localProjects := LoadLocalProjectPaths(paths)
-	localHome, _ := os.UserHomeDir()
+	localHome := InferHomeFromPaths(paths)
 	if info.WorkspaceURI != "" {
 		rawPath := strings.TrimPrefix(info.WorkspaceURI, "file://")
 		localizedPath := LocalizeWorkspacePath(rawPath, localProjects, localHome)
-		info.WorkspaceURI = "file://" + localizedPath
+		info.WorkspaceURI = NormalizeWorkspaceURI(localizedPath)
 	}
 
 	return info, nil
@@ -268,6 +288,8 @@ func parseTrajectoryMetadataBlob(data []byte, info *IdeConversationInfo) {
 				}
 			} else if num == 7 && info.WorkspaceURI == "" {
 				info.WorkspaceURI = string(bytesVal)
+			} else if num == 18 && info.ProjectID == "" {
+				info.ProjectID = string(bytesVal)
 			}
 		case protowire.Fixed32Type:
 			_, l := protowire.ConsumeFixed32(remaining)
@@ -471,13 +493,67 @@ func BuildCascadeTrajectorySummaryProto(info *IdeConversationInfo) []byte {
 	b = protowire.AppendTag(b, 10, protowire.BytesType)
 	b = protowire.AppendBytes(b, tsUser)
 
-	// Field 15: Annotations (empty message)
+	// Field 15: Annotations (TrajectoryAnnotations)
+	var annBytes []byte
+	if info.AnnotationTitle != "" {
+		annBytes = protowire.AppendTag(annBytes, 1, protowire.BytesType)
+		annBytes = protowire.AppendString(annBytes, info.AnnotationTitle)
+	}
+	if info.LastViewSec > 0 {
+		var tsView []byte
+		tsView = protowire.AppendTag(tsView, 1, protowire.VarintType)
+		tsView = protowire.AppendVarint(tsView, uint64(info.LastViewSec))
+		if info.LastViewNano > 0 {
+			tsView = protowire.AppendTag(tsView, 2, protowire.VarintType)
+			tsView = protowire.AppendVarint(tsView, uint64(info.LastViewNano))
+		}
+		annBytes = protowire.AppendTag(annBytes, 7, protowire.BytesType)
+		annBytes = protowire.AppendBytes(annBytes, tsView)
+	}
 	b = protowire.AppendTag(b, 15, protowire.BytesType)
-	b = protowire.AppendBytes(b, []byte{})
+	b = protowire.AppendBytes(b, annBytes)
 
-	// Field 16: Trajectory Type (varint 1)
+	// Field 16: Last User Input Step Index (varint)
 	b = protowire.AppendTag(b, 16, protowire.VarintType)
-	b = protowire.AppendVarint(b, 1)
+	b = protowire.AppendVarint(b, uint64(info.LastUserInputStep))
+
+	// Field 17: CortexTrajectoryMetadata (embeds workspace, created_time, cascade_id, and Field 18 project_id)
+	var metaBytes []byte
+	if len(info.RawMetadataBlob) > 0 {
+		metaBytes, _ = UpdateTrajectoryMetadataProto(info.RawMetadataBlob, info.WorkspaceURI, info.ProjectID)
+	} else {
+		if info.WorkspaceURI != "" {
+			metaBytes = protowire.AppendTag(metaBytes, 1, protowire.BytesType)
+			metaBytes = protowire.AppendBytes(metaBytes, wsBytes)
+		}
+		metaBytes = protowire.AppendTag(metaBytes, 2, protowire.BytesType)
+		metaBytes = protowire.AppendBytes(metaBytes, tsCreated)
+		if info.CascadeID != "" {
+			metaBytes = protowire.AppendTag(metaBytes, 6, protowire.BytesType)
+			metaBytes = protowire.AppendString(metaBytes, info.CascadeID)
+		}
+		if info.WorkspaceURI != "" {
+			metaBytes = protowire.AppendTag(metaBytes, 7, protowire.BytesType)
+			metaBytes = protowire.AppendString(metaBytes, info.WorkspaceURI)
+		}
+		if info.ProjectID != "" {
+			metaBytes = protowire.AppendTag(metaBytes, 18, protowire.BytesType)
+			metaBytes = protowire.AppendString(metaBytes, info.ProjectID)
+		}
+	}
+	b = protowire.AppendTag(b, 17, protowire.BytesType)
+	b = protowire.AppendBytes(b, metaBytes)
+
+	if info.Source > 0 {
+		b = protowire.AppendTag(b, 20, protowire.VarintType)
+		b = protowire.AppendVarint(b, uint64(info.Source))
+	}
+
+	// Field 22: Trajectory Type (4), Field 28: Version (4)
+	b = protowire.AppendTag(b, 22, protowire.VarintType)
+	b = protowire.AppendVarint(b, 4)
+	b = protowire.AppendTag(b, 28, protowire.VarintType)
+	b = protowire.AppendVarint(b, 4)
 
 	return b
 }
@@ -604,8 +680,12 @@ func EncodeUssTable(entries map[string]string) []byte {
 }
 
 // SyncIdeTrajectorySummaries synchronizes all local conversations into Antigravity IDE's state.vscdb
+// (legacy USS table fallback) and runs full unified history consolidation.
 func SyncIdeTrajectorySummaries(paths *Paths, verbosity int) (int, error) {
-	vscdbPaths := DetectIdeVscdbPaths()
+	vscdbPaths := paths.IdeStateVscdbFiles
+	if len(vscdbPaths) == 0 {
+		vscdbPaths = DetectIdeVscdbPathsForHome(InferHomeFromPaths(paths))
+	}
 	if len(vscdbPaths) == 0 {
 		return 0, nil
 	}
@@ -614,62 +694,16 @@ func SyncIdeTrajectorySummaries(paths *Paths, verbosity int) (int, error) {
 		return 0, fmt.Errorf("sqlite3 CLI is required to update IDE state database")
 	}
 
-	// Cross-populate all conversation .db files and brain directories into IdeConversations & IdeBrain
-	_ = os.MkdirAll(paths.IdeConversations, 0755)
-	_ = os.MkdirAll(paths.IdeBrain, 0755)
-
-	sourceConvFolders := []string{paths.CoreConversations, paths.CliConversations}
-	for _, srcFolder := range sourceConvFolders {
-		if _, err := os.Stat(srcFolder); err == nil {
-			_ = filepath.Walk(srcFolder, func(p string, info os.FileInfo, err error) error {
-				if err == nil && !info.IsDir() && strings.HasSuffix(p, ".db") {
-					targetPath := filepath.Join(paths.IdeConversations, info.Name())
-					if _, err := os.Stat(targetPath); os.IsNotExist(err) {
-						if err := CopyFileOverwrite(p, targetPath); err == nil {
-							_ = os.Chmod(targetPath, 0644)
-							_ = TranslateDbFile(targetPath, paths)
-						}
-					}
-				}
-				return nil
-			})
-		}
-	}
-
-	sourceBrainFolders := []string{paths.CoreBrain, paths.CliBrain}
-	for _, srcBrain := range sourceBrainFolders {
-		if entries, err := os.ReadDir(srcBrain); err == nil {
-			for _, entry := range entries {
-				if entry.IsDir() && !ShouldIgnoreSyncPath(entry.Name()) {
-					targetBrain := filepath.Join(paths.IdeBrain, entry.Name())
-					if _, err := os.Stat(targetBrain); os.IsNotExist(err) {
-						_ = MergeDirectories(filepath.Join(srcBrain, entry.Name()), targetBrain, &SyncStats{}, 0, paths)
-					}
-				}
-			}
-		}
-	}
-
-	// Clean up any stale root .db-shm or .db-wal files in IdeConversations
-	if entries, err := os.ReadDir(paths.IdeConversations); err == nil {
-		for _, entry := range entries {
-			name := entry.Name()
-			if strings.HasSuffix(name, ".db-shm") || strings.HasSuffix(name, ".db-wal") {
-				// remove stale journal files
-				_ = os.Remove(filepath.Join(paths.IdeConversations, name))
-			}
-		}
-	}
-
-	// Discover all conversation .db files
+	// Discover all conversation .db files from the unified CoreConversations first,
+	// falling back to CLI/IDE folders for any not yet consolidated.
 	var convDbPaths []string
-	folders := []string{paths.IdeConversations, paths.CoreConversations, paths.CliConversations}
+	folders := []string{paths.CoreConversations, paths.CliConversations, paths.IdeConversations}
 	seen := make(map[string]bool)
 
 	for _, folder := range folders {
 		if _, err := os.Stat(folder); err == nil {
 			_ = filepath.Walk(folder, func(p string, info os.FileInfo, err error) error {
-				if err == nil && !info.IsDir() && strings.HasSuffix(p, ".db") {
+				if err == nil && !info.IsDir() && strings.HasSuffix(p, ".db") && !ShouldIgnoreSyncPath(p) {
 					convID := strings.TrimSuffix(filepath.Base(p), ".db")
 					if !seen[convID] {
 						seen[convID] = true
@@ -687,9 +721,12 @@ func SyncIdeTrajectorySummaries(paths *Paths, verbosity int) (int, error) {
 
 	totalUpdated := 0
 	for _, vscdb := range vscdbPaths {
-		// 1. Read existing trajectorySummaries from state.vscdb
+		// 1. Read existing trajectorySummaries from state.vscdb (only if the table/key exists)
 		cmdRead := exec.Command("sqlite3", vscdb, "SELECT value FROM ItemTable WHERE key = 'antigravityUnifiedStateSync.trajectorySummaries' LIMIT 1;")
-		outVal, _ := cmdRead.Output()
+		outVal, err := cmdRead.Output()
+		if err != nil {
+			continue
+		}
 		b64Val := strings.TrimSpace(string(outVal))
 
 		var entries map[string]string
@@ -705,7 +742,7 @@ func SyncIdeTrajectorySummaries(paths *Paths, verbosity int) (int, error) {
 
 		addedOrUpdated := 0
 		localProjects := LoadLocalProjectPaths(paths)
-		localHome, _ := os.UserHomeDir()
+		localHome := InferHomeFromPaths(paths)
 
 		// 2. Translate/localize existing entries in the summary table
 		for convID, encodedSummary := range entries {
@@ -717,7 +754,7 @@ func SyncIdeTrajectorySummaries(paths *Paths, verbosity int) (int, error) {
 				for _, uri := range uris {
 					remotePath := strings.TrimPrefix(uri, "file://")
 					locPath := LocalizeWorkspacePath(remotePath, localProjects, localHome)
-					locURI := "file://" + locPath
+					locURI := NormalizeWorkspaceURI(locPath)
 					if uri != locURI {
 						if b, rep, err := TranslateProtobuf(current, uri, locURI); err == nil && rep {
 							current = b
@@ -761,7 +798,7 @@ func SyncIdeTrajectorySummaries(paths *Paths, verbosity int) (int, error) {
 		// Safely escape single quotes for SQLite
 		escapedVal := strings.ReplaceAll(newB64Table, "'", "''")
 		upsertSQL := fmt.Sprintf(
-			"INSERT INTO ItemTable(key, value) VALUES('antigravityUnifiedStateSync.trajectorySummaries', '%s') ON CONFLICT(key) DO UPDATE SET value = '%s';",
+			"PRAGMA busy_timeout = 5000; INSERT INTO ItemTable(key, value) VALUES('antigravityUnifiedStateSync.trajectorySummaries', '%s') ON CONFLICT(key) DO UPDATE SET value = '%s';",
 			escapedVal, escapedVal,
 		)
 

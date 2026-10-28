@@ -1,8 +1,10 @@
 package drive
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -24,6 +26,9 @@ var (
 	//   go build -ldflags="-X 'agysync/pkg/drive.DefaultClientID=...' -X 'agysync/pkg/drive.DefaultClientSecret=...'"
 	DefaultClientID     = ""
 	DefaultClientSecret = ""
+
+	// ErrCredentialsNotConfigured indicates that no OAuth client_id / client_secret were found.
+	ErrCredentialsNotConfigured = errors.New("google oauth client credentials are not configured")
 )
 
 // DriveService wraps the googleDrive.Service and settings
@@ -31,36 +36,145 @@ type DriveService struct {
 	Srv *googleDrive.Service
 }
 
+func sanitizeCredential(val string) string {
+	val = strings.TrimSpace(val)
+	val = strings.Trim(val, "\"'`")
+	return strings.TrimSpace(val)
+}
+
+func maskSecret(val string) string {
+	if len(val) <= 8 {
+		return "****"
+	}
+	return val[:6] + "..." + val[len(val)-4:]
+}
+
+func isValidCredential(val string) bool {
+	return val != "" && !strings.Contains(strings.ToLower(val), "dummy") && !strings.Contains(strings.ToLower(val), "your_client_")
+}
+
+// extractFromGoogleCredentialsJSON parses a standard Google Cloud Console client_secret_*.json file
+func extractFromGoogleCredentialsJSON(filePath string) (string, string, error) {
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		return "", "", err
+	}
+	var raw struct {
+		Installed *struct {
+			ClientID     string `json:"client_id"`
+			ClientSecret string `json:"client_secret"`
+		} `json:"installed"`
+		Web *struct {
+			ClientID     string `json:"client_id"`
+			ClientSecret string `json:"client_secret"`
+		} `json:"web"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return "", "", err
+	}
+	if raw.Installed != nil && isValidCredential(raw.Installed.ClientID) && isValidCredential(raw.Installed.ClientSecret) {
+		return sanitizeCredential(raw.Installed.ClientID), sanitizeCredential(raw.Installed.ClientSecret), nil
+	}
+	if raw.Web != nil && isValidCredential(raw.Web.ClientID) && isValidCredential(raw.Web.ClientSecret) {
+		return sanitizeCredential(raw.Web.ClientID), sanitizeCredential(raw.Web.ClientSecret), nil
+	}
+	return "", "", fmt.Errorf("no valid installed/web client_id and client_secret found in %s", filePath)
+}
+
+// findCredentialsJSONInConfigDir checks ~/.gemini/agysync_config/ for a downloaded client_secret*.json file
+func findCredentialsJSONInConfigDir(configDir string) (string, string, string) {
+	entries, err := os.ReadDir(configDir)
+	if err != nil {
+		return "", "", ""
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if strings.HasPrefix(name, "client_secret") && strings.HasSuffix(name, ".json") {
+			fullPath := filepath.Join(configDir, name)
+			if id, secret, err := extractFromGoogleCredentialsJSON(fullPath); err == nil {
+				return id, secret, fullPath
+			}
+		}
+	}
+	return "", "", ""
+}
+
 // GetDriveService initializes the Drive API client
 func GetDriveService(paths *sync.Paths) (*DriveService, error) {
-	var clientID, clientSecret string
+	localConfig, _ := sync.LoadLocalSettings(paths)
 
-	// 1. Try reading credentials from settings.json
-	localConfig, err := sync.LoadLocalSettings(paths)
-	if err == nil && localConfig != nil {
-		clientID = strings.TrimSpace(localConfig.ClientID)
-		clientSecret = strings.TrimSpace(localConfig.ClientSecret)
-	}
+	envID := sanitizeCredential(os.Getenv("AGYSYNC_CLIENT_ID"))
+	envSecret := sanitizeCredential(os.Getenv("AGYSYNC_CLIENT_SECRET"))
 
-	// 2. Fallback to env variables if not set in settings.json
-	if clientID == "" {
-		clientID = strings.TrimSpace(os.Getenv("AGYSYNC_CLIENT_ID"))
-	}
-	if clientSecret == "" {
-		clientSecret = strings.TrimSpace(os.Getenv("AGYSYNC_CLIENT_SECRET"))
+	var cfgID, cfgSecret string
+	if localConfig != nil {
+		cfgID = sanitizeCredential(localConfig.ClientID)
+		cfgSecret = sanitizeCredential(localConfig.ClientSecret)
 	}
 
-	// 3. Fallback to built-in / build-time injected credentials
-	if clientID == "" {
-		clientID = strings.TrimSpace(DefaultClientID)
-	}
-	if clientSecret == "" {
-		clientSecret = strings.TrimSpace(DefaultClientSecret)
+	jsonID, jsonSecret, jsonPath := findCredentialsJSONInConfigDir(paths.ConfigDir)
+	defID := sanitizeCredential(DefaultClientID)
+	defSecret := sanitizeCredential(DefaultClientSecret)
+
+	// Precedence:
+	// 1. Environment variables (explicit override in current shell)
+	// 2. client_secret*.json in ~/.gemini/agysync_config/
+	// 3. settings.json (~/.gemini/agysync_config/settings.json)
+	// 4. Build-time defaults (DefaultClientID / DefaultClientSecret)
+	var clientID, clientSecret, idSource, secretSource string
+
+	switch {
+	case isValidCredential(envID):
+		clientID = envID
+		idSource = "env:AGYSYNC_CLIENT_ID"
+	case isValidCredential(jsonID):
+		clientID = jsonID
+		idSource = jsonPath
+	case isValidCredential(cfgID):
+		clientID = cfgID
+		idSource = paths.SettingsFile
+	case isValidCredential(defID):
+		clientID = defID
+		idSource = "built-in default"
 	}
 
-	// 4. Validate credentials before initiating OAuth flow
-	if clientID == "" || clientSecret == "" || strings.Contains(clientID, "dummy") || strings.Contains(clientSecret, "dummy") {
-		return nil, fmt.Errorf("Google OAuth client credentials are not configured.\nPlease set 'client_id' and 'client_secret' in:\n  %s\nor export AGYSYNC_CLIENT_ID and AGYSYNC_CLIENT_SECRET", paths.SettingsFile)
+	switch {
+	case isValidCredential(envSecret):
+		clientSecret = envSecret
+		secretSource = "env:AGYSYNC_CLIENT_SECRET"
+	case isValidCredential(jsonSecret):
+		clientSecret = jsonSecret
+		secretSource = jsonPath
+	case isValidCredential(cfgSecret):
+		clientSecret = cfgSecret
+		secretSource = paths.SettingsFile
+	case isValidCredential(defSecret):
+		clientSecret = defSecret
+		secretSource = "built-in default"
+	}
+
+	// If credentials are still missing, prompt interactively once and persist to settings.json
+	if !isValidCredential(clientID) || !isValidCredential(clientSecret) {
+		promptedID, promptedSecret, promptErr := promptCredentialsInteractive(paths, clientID, clientSecret)
+		if promptErr != nil {
+			return nil, fmt.Errorf("%w\nPlease set 'client_id' and 'client_secret' in:\n  %s\nor export AGYSYNC_CLIENT_ID and AGYSYNC_CLIENT_SECRET", ErrCredentialsNotConfigured, paths.SettingsFile)
+		}
+		clientID = promptedID
+		clientSecret = promptedSecret
+		idSource = "interactive prompt"
+		secretSource = "interactive prompt"
+	}
+
+	// Persist credentials to settings.json immediately so user doesn't need to re-export env vars
+	if localConfig != nil && (localConfig.ClientID != clientID || localConfig.ClientSecret != clientSecret) {
+		localConfig.ClientID = clientID
+		localConfig.ClientSecret = clientSecret
+		if saveErr := sync.SaveLocalSettings(paths, localConfig); saveErr == nil {
+			fmt.Printf("[Auth] Saved OAuth client credentials to %s\n", paths.SettingsFile)
+		}
 	}
 
 	ctx := context.Background()
@@ -74,6 +188,16 @@ func GetDriveService(paths *sync.Paths) (*DriveService, error) {
 
 	token, err := getOrPromptToken(paths, config)
 	if err != nil {
+		if strings.Contains(err.Error(), "invalid_client") {
+			// Clear the rejected secret from settings.json so the next run prompts for a fresh secret
+			// instead of getting stuck in a loop with the stale secret.
+			if localConfig != nil && strings.Contains(err.Error(), "client secret is invalid") {
+				localConfig.ClientSecret = ""
+				_ = sync.SaveLocalSettings(paths, localConfig)
+			}
+			return nil, fmt.Errorf("%w\n\nCredential Diagnostic:\n  - Client ID (%s) loaded from: %s\n  - Client Secret (%s) loaded from: %s\n  - Why this happened: Google accepted the Client ID during browser login, but rejected the Client Secret when exchanging the authorization code for a token.\n  - Automatic recovery: Cleared the invalid 'client_secret' from %s. Re-run agysync and paste your valid Client Secret (GOCSPX-...) when prompted, and it will be saved permanently",
+				err, maskSecret(clientID), idSource, maskSecret(clientSecret), secretSource, paths.SettingsFile)
+		}
 		return nil, err
 	}
 
@@ -84,6 +208,43 @@ func GetDriveService(paths *sync.Paths) (*DriveService, error) {
 	}
 
 	return &DriveService{Srv: srv}, nil
+}
+
+// promptCredentialsInteractive prompts the user in an interactive terminal to enter Client ID / Secret once
+func promptCredentialsInteractive(paths *sync.Paths, currentID, currentSecret string) (string, string, error) {
+	fi, err := os.Stdin.Stat()
+	if err != nil || (fi.Mode()&os.ModeCharDevice) == 0 {
+		return "", "", ErrCredentialsNotConfigured
+	}
+
+	reader := bufio.NewReader(os.Stdin)
+	fmt.Println("\n[OAuth Setup] Google OAuth App credentials are required once and will be saved to:")
+	fmt.Printf("  %s\n", paths.SettingsFile)
+
+	clientID := currentID
+	if !isValidCredential(clientID) {
+		fmt.Print("Enter Google OAuth Client ID (e.g. xxx.apps.googleusercontent.com): ")
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			return "", "", ErrCredentialsNotConfigured
+		}
+		clientID = sanitizeCredential(line)
+	}
+
+	clientSecret := currentSecret
+	if !isValidCredential(clientSecret) {
+		fmt.Print("Enter Google OAuth Client Secret (e.g. GOCSPX-...): ")
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			return "", "", ErrCredentialsNotConfigured
+		}
+		clientSecret = sanitizeCredential(line)
+	}
+
+	if !isValidCredential(clientID) || !isValidCredential(clientSecret) {
+		return "", "", ErrCredentialsNotConfigured
+	}
+	return clientID, clientSecret, nil
 }
 
 func getOrPromptToken(paths *sync.Paths, config *oauth2.Config) (*oauth2.Token, error) {
@@ -211,17 +372,20 @@ func RelPath(flatName string) string {
 
 // UploadFile uploads or updates a file in the user's hidden AppData folder
 func (d *DriveService) UploadFile(localPath, driveName string) error {
+	fileID, err := d.findFileID(driveName)
+	if err != nil {
+		return err
+	}
+	return d.UploadFileWithID(localPath, driveName, fileID)
+}
+
+// UploadFileWithID uploads or updates a file in the user's hidden AppData folder using an optional known fileID
+func (d *DriveService) UploadFileWithID(localPath, driveName, fileID string) error {
 	f, err := os.Open(localPath)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
-
-	// Check if file already exists in Drive AppData
-	fileID, err := d.findFileID(driveName)
-	if err != nil {
-		return err
-	}
 
 	if fileID != "" {
 		// Update existing file
@@ -251,6 +415,14 @@ func (d *DriveService) DownloadFile(driveName, localPath string) error {
 	}
 	if fileID == "" {
 		return fmt.Errorf("file not found in Drive: %s", driveName)
+	}
+	return d.DownloadFileByID(fileID, driveName, localPath)
+}
+
+// DownloadFileByID downloads a file by its known Drive file ID to a local path
+func (d *DriveService) DownloadFileByID(fileID, driveName, localPath string) error {
+	if fileID == "" {
+		return d.DownloadFile(driveName, localPath)
 	}
 
 	res, err := d.Srv.Files.Get(fileID).Download()
@@ -359,11 +531,12 @@ func (d *DriveService) SaveMetadataFile(meta *sync.SyncMetadata) error {
 }
 
 func (d *DriveService) findFileID(name string) (string, error) {
-	q := fmt.Sprintf("name = '%s' and q = 'spaces = appDataFolder'", name)
+	escapedName := strings.ReplaceAll(name, "'", "\\'")
+	q := fmt.Sprintf("name = '%s' and trashed = false", escapedName)
 	// Build query
 	res, err := d.Srv.Files.List().Spaces("appDataFolder").Q(q).Fields("files(id)").Do()
 	if err != nil {
-		// Fallback to simple matching if Q filter fails on appDataFolder syntax
+		// Fallback to simple matching if Q filter fails
 		files, err2 := d.ListAppDataFiles()
 		if err2 != nil {
 			return "", err

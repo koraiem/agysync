@@ -77,11 +77,14 @@ func copyFileInternal(src, dst string, flags int) error {
 }
 
 // ShouldIgnoreSyncPath returns true for files and directories that should not be synced,
-// such as git internal objects (.git), OS metadata (.DS_Store), and temporary SQLite locks.
+// such as git internal objects (.git), OS metadata (.DS_Store), migration markers, and temporary SQLite locks.
 func ShouldIgnoreSyncPath(path string) bool {
 	base := filepath.Base(path)
 	if base == ".git" || base == ".DS_Store" || base == "ehthumbs.db" || base == "Thumbs.db" ||
-		strings.HasSuffix(base, ".db-shm") || strings.HasSuffix(base, ".db-wal") {
+		base == ".ide_migration" ||
+		(strings.HasPrefix(base, ".") && strings.HasSuffix(base, ".done")) ||
+		strings.HasSuffix(base, ".db-shm") || strings.HasSuffix(base, ".db-wal") ||
+		strings.HasSuffix(base, ".lock") {
 		return true
 	}
 	parts := strings.Split(filepath.ToSlash(path), "/")
@@ -248,7 +251,7 @@ func readEntries(filePath string, entries map[string]HistoryEntry, paths *Paths)
 	defer file.Close()
 
 	localProjects := LoadLocalProjectPaths(paths)
-	localHome, _ := os.UserHomeDir()
+	localHome := InferHomeFromPaths(paths)
 
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
@@ -270,60 +273,6 @@ func readEntries(filePath string, entries map[string]HistoryEntry, paths *Paths)
 		entries[key] = entry
 	}
 	return scanner.Err()
-}
-
-// LoadLocalProjectPaths retrieves the local project folder paths from projects.json
-func LoadLocalProjectPaths(paths *Paths) []string {
-	var projects struct {
-		Projects map[string]string `json:"projects"`
-	}
-	data, err := os.ReadFile(filepath.Join(paths.BaseDir, "projects.json"))
-	if err == nil {
-		_ = json.Unmarshal(data, &projects)
-	}
-	var list []string
-	for k := range projects.Projects {
-		if k != "/" {
-			list = append(list, k)
-		}
-	}
-	return list
-}
-
-// LocalizeWorkspacePath translates a remote path to match the local machine's workspace path
-func LocalizeWorkspacePath(remotePath string, localProjects []string, localHome string) string {
-	remotePath = filepath.ToSlash(remotePath)
-	remoteClean := strings.TrimPrefix(remotePath, "file://")
-
-	// 1. Try to match by project name (last segment)
-	remoteLast := filepath.Base(remoteClean)
-	for _, lp := range localProjects {
-		lpSlash := filepath.ToSlash(lp)
-		if filepath.Base(lpSlash) == remoteLast {
-			if strings.HasPrefix(remotePath, "file://") {
-				return lpSlash
-			}
-			return lpSlash
-		}
-	}
-
-	// 2. Fallback: replace home directory prefix
-	var remoteHome string
-	parts := strings.Split(strings.TrimPrefix(remoteClean, "/"), "/")
-	if len(parts) >= 2 && (parts[0] == "home" || parts[0] == "Users") {
-		remoteHome = "/" + parts[0] + "/" + parts[1]
-	} else if len(parts) >= 1 && strings.HasPrefix(remoteClean, "C:/Users/") {
-		wParts := strings.Split(remoteClean, "/")
-		if len(wParts) >= 3 {
-			remoteHome = strings.Join(wParts[:3], "/")
-		}
-	}
-
-	if remoteHome != "" {
-		return strings.Replace(remoteClean, remoteHome, localHome, 1)
-	}
-
-	return remoteClean
 }
 
 // FindRemoteURIs scans binary data for strings starting with file://
@@ -430,7 +379,7 @@ func TranslateDbFile(dbPath string, paths *Paths) error {
 	}
 
 	localProjects := LoadLocalProjectPaths(paths)
-	localHome, _ := os.UserHomeDir()
+	localHome := InferHomeFromPaths(paths)
 
 	uris := FindRemoteURIs(dataBytes)
 	if len(uris) == 0 {
@@ -465,7 +414,7 @@ func TranslateDbFile(dbPath string, paths *Paths) error {
 	}
 
 	newHexStr := hex.EncodeToString(currentBytes)
-	updateSQL := fmt.Sprintf("UPDATE trajectory_metadata_blob SET data = x'%s' WHERE id = 'main'", newHexStr)
+	updateSQL := fmt.Sprintf("PRAGMA busy_timeout = 5000; UPDATE trajectory_metadata_blob SET data = x'%s' WHERE id = 'main'", newHexStr)
 	return exec.Command("sqlite3", dbPath, updateSQL).Run()
 }
 
@@ -489,7 +438,7 @@ func CanonicalizeDbFile(dbPath string, paths *Paths) error {
 		return err
 	}
 
-	localHome, _ := os.UserHomeDir()
+	localHome := InferHomeFromPaths(paths)
 
 	uris := FindRemoteURIs(dataBytes)
 	if len(uris) == 0 {
@@ -500,11 +449,8 @@ func CanonicalizeDbFile(dbPath string, paths *Paths) error {
 	currentBytes := dataBytes
 	for _, uri := range uris {
 		remotePath := strings.TrimPrefix(uri, "file://")
-		canonicalPath := remotePath
-		if strings.HasPrefix(remotePath, localHome) {
-			canonicalPath = "~" + strings.TrimPrefix(remotePath, localHome)
-		}
-		canonicalURI := "file://" + canonicalPath
+		canonicalURI := CanonicalizeWorkspaceURI(uri, localHome)
+		canonicalPath := strings.TrimPrefix(canonicalURI, "file://")
 
 		if uri != canonicalURI {
 			b, replaced, err := TranslateProtobuf(currentBytes, uri, canonicalURI)
@@ -527,7 +473,7 @@ func CanonicalizeDbFile(dbPath string, paths *Paths) error {
 	}
 
 	newHexStr := hex.EncodeToString(currentBytes)
-	updateSQL := fmt.Sprintf("UPDATE trajectory_metadata_blob SET data = x'%s' WHERE id = 'main'", newHexStr)
+	updateSQL := fmt.Sprintf("PRAGMA busy_timeout = 5000; UPDATE trajectory_metadata_blob SET data = x'%s' WHERE id = 'main'", newHexStr)
 	return exec.Command("sqlite3", dbPath, updateSQL).Run()
 }
 

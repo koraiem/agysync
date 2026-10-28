@@ -11,13 +11,14 @@ AgySync provides zero-trust, bidirectional synchronization of Antigravity histor
 - **Local / Offline Sync**: Syncs directly with local directories, removable media, or network storage shares.
 
 ### Key Capabilities:
-- 🔄 **Bidirectional Sync Engine**: Phase 1 downloads and merges remote changes; Phase 2 canonicalizes and back-propagates local additions.
-- ⚡ **Antigravity IDE Unified State Sync (USS)**: Integrates directly with Antigravity IDE's internal SQLite state store (`state.vscdb`) and Protobuf wire format so that all synced conversations appear in the **"Past Conversations"** menu with complete titles and timestamps.
-- 🗺️ **Cross-Platform Path Localization**: Automatically translates Linux (`/home/<user>/...`), macOS (`/Users/<user>/...`), and Windows (`C:/Users/<user>/...`) workspace paths and resolves dynamic project directories via `projects.json`.
-- 🛡️ **Automated Safety Backups**: Generates an isolated, timestamped snapshot of active histories in `~/.gemini/agysync_backups/` before applying any modifications.
-- 🧪 **Safe Dry-Run Comparison**: Simulates sync operations without writing to disk, producing a clear comparison report.
+- 🔄 **Bidirectional Sync Engine**: Phase 1 downloads and merges remote changes; Phase 2 consolidates local orphans, joins projects, and canonicalizes/uploads local additions.
+- 🧩 **Unified Orphan Consolidation & Project Joining**: Automatically harvests orphaned conversations, brain artifacts, and annotations from legacy `antigravity-ide/` and `antigravity-cli/` into the unified `antigravity/` store, creates or converges `~/.gemini/config/projects/<id>.json` definitions using deterministic UUIDv5 hashing, and updates `trajectory_metadata_blob` (Field `18` `project_id`), `agyhub_summaries_proto.pb` (Field `17.18`), and `conversation_summaries.db` (plus FTS5 search headers) in lockstep.
+- ⚡ **Antigravity Desktop & IDE v2.6+ Integration**: Updates `projectsOrder` in both Antigravity Desktop (`app_storage.json`) and Antigravity IDE (`state.vscdb`), while maintaining backward-compatible USS summaries (`antigravityUnifiedStateSync.trajectorySummaries`).
+- 🗺️ **Disambiguated Cross-Platform Path Localization**: Translates Linux (`/home/<user>/...`), macOS (`/Users/<user>/...`), and Windows (`C:/Users/<user>/...`) workspace paths without colliding across nested projects sharing a folder name (e.g., `~/dev/routemap` vs `~/dev/other/routemap`).
+- 🛡️ **Automated Safety Backups**: Generates an incremental snapshot of active histories, project definitions, and summary stores in `~/.gemini/agysync_backups/` before applying any modifications.
+- 🧪 **Safe Dry-Run Comparison**: Simulates both local orphan consolidation and cloud sync operations without writing to disk.
 - 📋 **CLI History Deduplication**: Chronologically merges and deduplicates `antigravity-cli/history.jsonl` entries across all machines.
-- 🔒 **Lock & Permission Sanitization**: Automatically resolves orphaned `.db-shm` / `.db-wal` locks and ensures correct read/write permissions.
+- 🔒 **WAL-Safe Database Handling**: Uses `sqlite3 .backup` when harvesting databases with active WAL journals rather than deleting `.db-wal` / `.db-shm` files.
 
 ---
 
@@ -190,15 +191,35 @@ GOOS=windows GOARCH=amd64 go build -ldflags="-s -w" -o bin/agysync-windows-amd64
 ./bin/agysync -src /path/to/backup/.gemini -sync -v
 ```
 
-### 2. Standalone Path Translation & IDE Re-Indexing
+### 2. Standalone Local Orphan Consolidation & Path Translation
 
-To force-localize workspace paths inside SQLite conversation databases and refresh Antigravity IDE's past conversations index:
+To preview or execute local consolidation of orphaned `antigravity-ide/` and `antigravity-cli/` conversations into unified projects without touching Google Drive:
 
 ```bash
+# Preview local orphan consolidation & project joining (Dry Run)
+./bin/agysync -migrate
+
+# Execute local consolidation with pre-migration backup
+./bin/agysync -migrate -sync -v
+
+# Force-translate all SQLite conversation paths and reconcile project indexes
 ./bin/agysync -translate -v
 ```
 
-### 3. Google Drive Cloud Sync
+### 3. Multi-Machine Consolidation & Google Drive Cloud Sync
+
+Because `agysync -sync` automatically consolidates local orphaned conversations and converges duplicate project UUIDs onto remote Drive project IDs, unifying multiple machines requires only 3 runs:
+
+```bash
+# 1. On Machine 1: Consolidate M1 orphans, join projects, and upload unified state to Drive
+./bin/agysync -sync
+
+# 2. On Machine 2: Consolidate M2 orphans, pull M1 state, converge project IDs, and upload M2 delta
+./bin/agysync -sync
+
+# 3. On Machine 1: Pull M2 delta (all machines and Google Drive are now 100% unified)
+./bin/agysync -sync
+```
 
 #### Option A: Interactive Browser Login (Default)
 Simply run `agysync`:
@@ -232,9 +253,10 @@ export AGYSYNC_CLIENT_SECRET="GOCSPX-your_client_secret"
 | Flag | Description |
 | :--- | :--- |
 | **`-src <path>`** | Specifies local source backup folder (offline/fallback mode). |
-| **`-sync`** | Executes bidirectional synchronization with automated backups and back-propagation. When omitted, runs in **Dry-Run Mode** (read-only comparison report). |
-| **`-autoclean`** | Prunes ignored/unnecessary files (`.git`, `.DS_Store`, stale lock files) from Google Drive AppData or backup destination. |
-| **`-translate`** | Standalone pass to force-translate all local conversation databases to the current machine's paths and synchronize Antigravity IDE's `state.vscdb` index. |
+| **`-sync`** | Executes bidirectional synchronization (or local migration when combined with `-migrate`) with automated backups. When omitted, runs in **Dry-Run Mode**. |
+| **`-migrate`** | Consolidates local orphaned IDE/CLI conversations & brains into `antigravity/` and joins them to projects in `config/projects/` without connecting to Google Drive (dry-run unless `-sync` is passed). |
+| **`-autoclean`** | Prunes ignored/deprecated files (`.git`, `.DS_Store`, stale lock files, legacy `antigravity-ide__*`) from Google Drive AppData or backup destination. |
+| **`-translate`** | Standalone pass to force-translate all local conversation databases to the current machine's paths and reconcile all unified project & summary indexes. |
 | **`-v`** | Verbose synced mode: lists all files, databases, and commands modified or synced. |
 | **`-vv`** | Verbose all mode: lists every scanned file, including unchanged and skipped files. |
 | **`-logout`** | Logs out of the active Google Drive OAuth session by clearing the local cached credentials token (`oauth_token.json`). |
