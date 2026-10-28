@@ -237,6 +237,7 @@ export AGYSYNC_CLIENT_SECRET="GOCSPX-your_client_secret"
 | **`-translate`** | Standalone pass to force-translate all local conversation databases to the current machine's paths and synchronize Antigravity IDE's `state.vscdb` index. |
 | **`-v`** | Verbose synced mode: lists all files, databases, and commands modified or synced. |
 | **`-vv`** | Verbose all mode: lists every scanned file, including unchanged and skipped files. |
+| **`-logout`** | Logs out of the active Google Drive OAuth session by clearing the local cached credentials token (`oauth_token.json`). |
 | **`-h` / `--help`** | Displays detailed usage, flags, and safety guidelines. |
 
 ---

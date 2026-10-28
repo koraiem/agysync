@@ -22,6 +22,7 @@ func main() {
 	verboseSyncedFlag := flag.Bool("v", false, "Show only synced (copied) files during execution")
 	verboseAllFlag := flag.Bool("vv", false, "Show all files checked (copied and skipped) during execution")
 	translateFlag := flag.Bool("translate", false, "Force translate/localize all local SQLite database conversation paths")
+	logoutFlag := flag.Bool("logout", false, "Log out of Google Drive OAuth session by clearing stored tokens")
 
 	// Custom Usage
 	flag.Usage = func() {
@@ -38,6 +39,8 @@ func main() {
 		fmt.Println("     agysync -sync -autoclean")
 		fmt.Println("\n  4. Local Folder Sync Mode (Fallback / Offline sync):")
 		fmt.Println("     agysync -src /path/to/backup/.gemini -sync")
+		fmt.Println("\n  5. Log out of Google Drive OAuth session:")
+		fmt.Println("     agysync -logout")
 		fmt.Println("\nSafety Features:")
 		fmt.Println("  - Pre-sync Backup: AgySync automatically archives your active configuration to ~/.gemini/agysync_backups/")
 		fmt.Println("    before any merging begins to prevent data loss.")
@@ -56,6 +59,22 @@ func main() {
 
 	fmt.Println("=== Antigravity Sync (AgySync) ===")
 	fmt.Printf("Active Base Directory: %s\n", dstPaths.BaseDir)
+
+	if *logoutFlag {
+		fmt.Println("\nAction: Logging out of Google Drive OAuth session...")
+		cleared, err := drive.Logout(dstPaths)
+		if err != nil {
+			fmt.Printf("Error during logout: %v\n", err)
+			os.Exit(1)
+		}
+		if cleared {
+			fmt.Println("Successfully logged out. OAuth session token cleared.")
+			fmt.Printf("Removed: %s\n", dstPaths.TokenFile)
+		} else {
+			fmt.Println("No active OAuth session found (already logged out).")
+		}
+		return
+	}
 
 	// Determine verbosity level
 	verbosity := 0

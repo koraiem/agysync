@@ -19,9 +19,11 @@ import (
 	"google.golang.org/api/option"
 )
 
-const (
-	DefaultClientID     = "1090403333333-developer-id-dummy.apps.googleusercontent.com"
-	DefaultClientSecret = "GOCSPX-developer-secret-dummy-code"
+var (
+	// DefaultClientID and DefaultClientSecret can be injected at build-time:
+	//   go build -ldflags="-X 'agysync/pkg/drive.DefaultClientID=...' -X 'agysync/pkg/drive.DefaultClientSecret=...'"
+	DefaultClientID     = ""
+	DefaultClientSecret = ""
 )
 
 // DriveService wraps the googleDrive.Service and settings
@@ -36,22 +38,29 @@ func GetDriveService(paths *sync.Paths) (*DriveService, error) {
 	// 1. Try reading credentials from settings.json
 	localConfig, err := sync.LoadLocalSettings(paths)
 	if err == nil && localConfig != nil {
-		clientID = localConfig.ClientID
-		clientSecret = localConfig.ClientSecret
+		clientID = strings.TrimSpace(localConfig.ClientID)
+		clientSecret = strings.TrimSpace(localConfig.ClientSecret)
 	}
 
 	// 2. Fallback to env variables if not set in settings.json
-	if clientID == "" || clientSecret == "" {
-		clientID = os.Getenv("AGYSYNC_CLIENT_ID")
-		clientSecret = os.Getenv("AGYSYNC_CLIENT_SECRET")
+	if clientID == "" {
+		clientID = strings.TrimSpace(os.Getenv("AGYSYNC_CLIENT_ID"))
+	}
+	if clientSecret == "" {
+		clientSecret = strings.TrimSpace(os.Getenv("AGYSYNC_CLIENT_SECRET"))
 	}
 
-	// 3. Fallback to built-in developer credentials (which require test-user registration)
-	if clientID == "" || clientSecret == "" {
-		fmt.Println("[Info] No custom credentials found in settings.json or env variables.")
-		fmt.Printf("Using default developer credentials. To use your own client ID and secret, paste them into:\n  %s\n\n", paths.SettingsFile)
-		clientID = DefaultClientID
-		clientSecret = DefaultClientSecret
+	// 3. Fallback to built-in / build-time injected credentials
+	if clientID == "" {
+		clientID = strings.TrimSpace(DefaultClientID)
+	}
+	if clientSecret == "" {
+		clientSecret = strings.TrimSpace(DefaultClientSecret)
+	}
+
+	// 4. Validate credentials before initiating OAuth flow
+	if clientID == "" || clientSecret == "" || strings.Contains(clientID, "dummy") || strings.Contains(clientSecret, "dummy") {
+		return nil, fmt.Errorf("Google OAuth client credentials are not configured.\nPlease set 'client_id' and 'client_secret' in:\n  %s\nor export AGYSYNC_CLIENT_ID and AGYSYNC_CLIENT_SECRET", paths.SettingsFile)
 	}
 
 	ctx := context.Background()
@@ -110,7 +119,7 @@ func getOrPromptToken(paths *sync.Paths, config *oauth2.Config) (*oauth2.Token, 
 }
 
 func promptNewToken(paths *sync.Paths, config *oauth2.Config) (*oauth2.Token, error) {
-	authURL := config.AuthCodeURL("state-token", oauth2.AccessTypeOffline, oauth2.ApprovalForce)
+	authURL := config.AuthCodeURL("state-token", oauth2.AccessTypeOffline, oauth2.ApprovalForce, oauth2.SetAuthURLParam("prompt", "select_account consent"))
 	fmt.Printf("\nAuthorize AgySync by visiting this link in your browser:\n\n%s\n\n", authURL)
 	fmt.Println("Please log in, grant access, and approve permissions.")
 	fmt.Println("If the local browser callback completes, authentication will finish automatically.")
@@ -406,4 +415,15 @@ func (d *DriveService) AppendGlobalSyncLog(entry map[string]interface{}) error {
 // DownloadGlobalSyncLog downloads the global_sync_log.jsonl into a local path
 func (d *DriveService) DownloadGlobalSyncLog(localPath string) error {
 	return d.DownloadFile("global_sync_log.jsonl", localPath)
+}
+
+// Logout removes the locally stored Google OAuth token
+func Logout(paths *sync.Paths) (bool, error) {
+	if _, err := os.Stat(paths.TokenFile); os.IsNotExist(err) {
+		return false, nil
+	}
+	if err := os.Remove(paths.TokenFile); err != nil {
+		return false, fmt.Errorf("failed to remove token file: %w", err)
+	}
+	return true, nil
 }
