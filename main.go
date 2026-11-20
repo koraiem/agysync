@@ -19,7 +19,7 @@ func main() {
 	srcBaseFlag := flag.String("src", "", "Path to backup source .gemini folder (local folder sync mode fallback)")
 	syncFlag := flag.Bool("sync", false, "Perform the bidirectional sync or migration (with backup, propagation, and logs)")
 	migrateFlag := flag.Bool("migrate", false, "Consolidate local orphaned IDE/CLI conversations & join projects without Google Drive (dry-run unless -sync is passed)")
-	autocleanFlag := flag.Bool("autoclean", false, "Prune ignored/deprecated files (.git, .DS_Store, stale locks, migrated antigravity-ide__*) from Google Drive AppData or destination")
+	autocleanFlag := flag.Bool("autoclean", false, "Prune ignored/ephemeral/deprecated files (.system_generated, .tempmediaStorage, scratch, browser, *.resolved*, .git, .DS_Store, stale locks, migrated antigravity-ide__*) from Google Drive AppData or destination")
 	verboseSyncedFlag := flag.Bool("v", false, "Show only synced (copied) files during execution")
 	verboseAllFlag := flag.Bool("vv", false, "Show all files checked (copied and skipped) during execution")
 	translateFlag := flag.Bool("translate", false, "Force translate/localize all local SQLite database conversation paths and reconcile project indexes")
@@ -522,7 +522,7 @@ func runGoogleDriveSync(dstPaths *sync.Paths, performSync bool, verbosity int, a
 
 		if len(ignoredRemoteFiles) > 0 {
 			if autoClean {
-				fmt.Printf("\n  🗑️ [Autoclean] Would prune %d ignored/deprecated file(s) from Google Drive (.git, .DS_Store, stale locks, legacy antigravity-ide__*):\n", len(ignoredRemoteFiles))
+				fmt.Printf("\n  🗑️ [Autoclean] Would prune %d ignored/deprecated file(s) from Google Drive (.system_generated, .tempmediaStorage, scratch, browser, *.resolved*, .git, .DS_Store, stale locks, legacy antigravity-ide__*):\n", len(ignoredRemoteFiles))
 				if verbosity >= 1 {
 					for _, f := range ignoredRemoteFiles {
 						fmt.Printf("    - %s\n", drive.RelPath(f.Name))

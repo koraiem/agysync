@@ -77,23 +77,43 @@ func copyFileInternal(src, dst string, flags int) error {
 }
 
 // ShouldIgnoreSyncPath returns true for files and directories that should not be synced,
-// such as git internal objects (.git), OS metadata (.DS_Store), migration markers, and temporary SQLite locks.
+// such as git internal objects (.git), OS metadata (.DS_Store), migration markers,
+// temporary SQLite locks, and ephemeral Antigravity brain/cache directories
+// (.system_generated, .tempmediaStorage, scratch, .user_uploaded, browser, *.resolved*).
 func ShouldIgnoreSyncPath(path string) bool {
 	base := filepath.Base(path)
 	if base == ".git" || base == ".DS_Store" || base == "ehthumbs.db" || base == "Thumbs.db" ||
 		base == ".ide_migration" ||
+		base == ".system_generated" || base == ".tempmediaStorage" ||
+		base == "scratch" || base == ".user_uploaded" || base == "browser" || base == "node_modules" ||
 		(strings.HasPrefix(base, ".") && strings.HasSuffix(base, ".done")) ||
 		strings.HasSuffix(base, ".db-shm") || strings.HasSuffix(base, ".db-wal") ||
-		strings.HasSuffix(base, ".lock") {
+		strings.HasSuffix(base, ".lock") || strings.HasSuffix(base, ".resolved") {
 		return true
+	}
+	if idx := strings.Index(base, ".resolved."); idx != -1 {
+		suffix := base[idx+len(".resolved."):]
+		if suffix != "" && isAllDigits(suffix) {
+			return true
+		}
 	}
 	parts := strings.Split(filepath.ToSlash(path), "/")
 	for _, part := range parts {
-		if part == ".git" {
+		switch part {
+		case ".git", ".system_generated", ".tempmediaStorage", "scratch", ".user_uploaded", "browser", "node_modules":
 			return true
 		}
 	}
 	return false
+}
+
+func isAllDigits(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return len(s) > 0
 }
 
 // MergeDirectories recursively merges srcDir into dstDir without overwriting existing files.

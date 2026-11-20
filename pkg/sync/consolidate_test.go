@@ -415,3 +415,34 @@ func TestMultiMachineOrphanConsolidationAndConvergence(t *testing.T) {
 		}
 	}
 }
+
+func TestShouldIgnoreSyncPath(t *testing.T) {
+	cases := []struct {
+		path string
+		want bool
+	}{
+		{"antigravity/conversations/abc.pb", false},
+		{"antigravity/brain/uuid/task.md", false},
+		{"antigravity/brain/uuid/task.md.metadata.json", false},
+		{"antigravity/brain/uuid/implementation_plan.md", false},
+		{"antigravity/annotations/uuid.pbtxt", false},
+		{"config/projects/proj.json", false},
+		{"antigravity/brain/uuid/.system_generated/logs/transcript.jsonl", true},
+		{"antigravity/brain/uuid/.system_generated/steps/1/output.txt", true},
+		{"antigravity/brain/uuid/.tempmediaStorage/img.png", true},
+		{"antigravity/brain/uuid/scratch/test.py", true},
+		{"antigravity/brain/uuid/.user_uploaded/file.pdf", true},
+		{"antigravity/brain/uuid/browser/shot.png", true},
+		{"antigravity/brain/uuid/task.md.resolved", true},
+		{"antigravity/brain/uuid/task.md.resolved.0", true},
+		{"antigravity/brain/uuid/implementation_plan.md.resolved.12", true},
+		{"history/proj/.git/objects/ab/cdef", true},
+		{"antigravity/brain/uuid/.DS_Store", true},
+		{"antigravity/conversation_summaries.db-wal", true},
+	}
+	for _, tc := range cases {
+		if got := ShouldIgnoreSyncPath(tc.path); got != tc.want {
+			t.Errorf("ShouldIgnoreSyncPath(%q) = %v, want %v", tc.path, got, tc.want)
+		}
+	}
+}
